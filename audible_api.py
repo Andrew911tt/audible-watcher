@@ -217,6 +217,8 @@ def _simplify(product: dict, marketplace: str) -> dict:
         "release_date": release_date,  # YYYY-MM-DD or None if TBA
         "runtime_minutes": product.get("runtime_length_min"),
         "language": product.get("language"),
+        # "Podcast" for podcasts (not audiobooks); "Product" for books
+        "content_type": product.get("content_type"),
         "image_url": image_url,
         "url": _store_url(marketplace, product.get("asin", "")),
     }
@@ -292,7 +294,7 @@ def search_series_candidates(keywords: str, marketplace: str = "us",
     books = search_by_keywords(keywords, marketplace, max_results=50)
     seen: dict[str, dict] = {}
     for b in books:
-        if not matches_language(b, language):
+        if not matches_language(b, language) or is_podcast(b):
             continue
         for s in b["all_series"]:
             if not s.get("asin") or not s.get("title"):
@@ -427,12 +429,20 @@ def check_market_availability(asin: str, title: str,
     return any(p.get("asin") == asin for p in products)
 
 
+def is_podcast(book: dict) -> bool:
+    return (book.get("content_type") or "").casefold() == "podcast"
+
+
 def fetch_watch_books(watch_type: str, name: str, asin: str | None,
                       marketplace: str = "us") -> list[dict]:
-    """Current Audible catalog entries for a watched author or series."""
+    """Current Audible catalog entries for a watched author or series,
+    podcasts included: callers split them off with is_podcast (a podcast
+    that shares an author's name isn't one of their books)."""
     if watch_type == "author":
         # newest first, and all of them: heavily translated authors still
         # show their whole own-language back catalogue
-        return search_by_author(name, marketplace, strict=True,
-                                max_results=WATCH_FETCH_LIMIT)
-    return books_in_series(name, asin, marketplace)
+        books = search_by_author(name, marketplace, strict=True,
+                                 max_results=WATCH_FETCH_LIMIT)
+    else:
+        books = books_in_series(name, asin, marketplace)
+    return books

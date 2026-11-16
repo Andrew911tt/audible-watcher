@@ -690,7 +690,8 @@ def search():
             books = audible_api.search_by_author(q, mp, max_results=50,
                                                  sort=None)
             books = [b for b in books
-                     if audible_api.matches_language(b, lang)]
+                     if audible_api.matches_language(b, lang)
+                     and not audible_api.is_podcast(b)]
             names = {}
             for b in books:
                 for name in b["author_list"]:  # "Name, Jr." stays whole

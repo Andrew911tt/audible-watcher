@@ -228,8 +228,10 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
     """
     marketplace = settings.get("marketplace", "us")
     first_fetch = not w.get("baselined_at")
-    books = audible_api.fetch_watch_books(
+    fetched = audible_api.fetch_watch_books(
         w["type"], w["name"], w["asin"], marketplace)
+    podcasts = {b["asin"] for b in fetched if audible_api.is_podcast(b)}
+    books = [b for b in fetched if not audible_api.is_podcast(b)]
     if first_fetch and w["type"] == "series" and not books:
         # Each Audible store has its own series IDs, so after a marketplace
         # change the stored one finds nothing: look the series up in this
@@ -240,8 +242,9 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
             log.info("Series %r is %s in this store", w["name"], asin)
             db.set_watch_asin(w["id"], asin)
             w = dict(w, asin=asin)
-            books = audible_api.fetch_watch_books(
+            books = [b for b in audible_api.fetch_watch_books(
                 w["type"], w["name"], w["asin"], marketplace)
+                if not audible_api.is_podcast(b)]
     keep, foreign = _split_by_language(books, settings)
     _store_foreign(w["id"], foreign)
     updated_fetch = (not first_fetch and (w.get("fetch_rev") or 0)
@@ -258,6 +261,13 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
     else:
         fresh = db.upsert_books(w["id"], keep, as_new=True)
     db.set_fetch_rev(w["id"], audible_api.FETCH_REVISION)
+    db.hide_podcasts(w["id"], podcasts)  # podcasts linked before 1.0.6
+    if w["type"] == "author":
+        gone = db.hide_not_by_author(w["id"], w["name"],
+                                     {b["asin"] for b in books})
+        if gone:
+            log.info("Watch %r: hid %d title(s) that aren't by this author "
+                     "or are podcasts", w["name"], gone)
     stubs = db.hide_placeholders(w["id"])
     if stubs:
         log.info("Watch %r: hid %d no-date placeholder(s) of dated books",
@@ -435,8 +445,9 @@ def baseline_watch(watch_id: int) -> int:
     if not w:
         return 0
     settings = db.get_settings()
-    books = audible_api.fetch_watch_books(
+    books = [b for b in audible_api.fetch_watch_books(
         w["type"], w["name"], w["asin"], settings.get("marketplace", "us"))
+        if not audible_api.is_podcast(b)]
     keep, foreign = _split_by_language(books, settings)
     _store_foreign(watch_id, foreign)
     inserted = db.upsert_books(watch_id, keep, as_new=False)

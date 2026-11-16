@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS watch_books (
                                                -- dated listing
     keep_visible  INTEGER NOT NULL DEFAULT 0,  -- you unhid it: never hide
                                                -- it again automatically
+    mismatch_hidden INTEGER NOT NULL DEFAULT 0,  -- not this author's book
+                                               -- (or a podcast)
     PRIMARY KEY (asin, watch_id)
 );
 
@@ -192,7 +194,8 @@ def init_db():
         if "store_hidden" not in link_cols:
             c.execute("ALTER TABLE watch_books ADD COLUMN store_hidden "
                       "INTEGER NOT NULL DEFAULT 0")
-        for col in ("placeholder_hidden", "keep_visible"):
+        for col in ("placeholder_hidden", "keep_visible",
+                    "mismatch_hidden"):
             if col not in link_cols:
                 c.execute(f"ALTER TABLE watch_books ADD COLUMN {col} "
                           "INTEGER NOT NULL DEFAULT 0")
@@ -491,7 +494,7 @@ def hide_books(watch_id: int, asins: list[str]):
 def books_for_watch(watch_id: int, include_hidden: bool = False) -> list[dict]:
     q = ("SELECT b.*, wb.watch_id, wb.discovered_at, wb.is_new, "
          "wb.notified, wb.hidden, wb.store_hidden, wb.region_hidden, "
-         "wb.placeholder_hidden, wb.keep_visible, "
+         "wb.placeholder_hidden, wb.keep_visible, wb.mismatch_hidden, "
          "w.name AS watch_name, "
          "w.type AS watch_type, w.asin AS watch_asin "
          "FROM books b JOIN watch_books wb ON wb.asin = b.asin "
@@ -716,12 +719,14 @@ def set_book_hidden(asin: str, watch_id: int, hidden: bool):
             c.execute(_HIDE + "asin = ? AND watch_id = ?", (asin, watch_id))
             c.execute("UPDATE watch_books SET region_hidden = 0, "
                       "store_hidden = 0, placeholder_hidden = 0, "
-                      "keep_visible = 0 WHERE asin = ? AND watch_id = ?",
+                      "mismatch_hidden = 0, keep_visible = 0 "
+                      "WHERE asin = ? AND watch_id = ?",
                       (asin, watch_id))
         else:
             c.execute("UPDATE watch_books SET hidden = 0, region_hidden = 0, "
                       "store_hidden = 0, placeholder_hidden = 0, "
-                      "keep_visible = 1 WHERE asin = ? AND watch_id = ?",
+                      "mismatch_hidden = 0, keep_visible = 1 "
+                      "WHERE asin = ? AND watch_id = ?",
                       (asin, watch_id))
 
 
@@ -734,6 +739,46 @@ _ALT_VERSION = re.compile(
 
 def _is_alt_version(title: str | None) -> bool:
     return bool(_ALT_VERSION.search(title or ""))
+
+
+def hide_not_by_author(watch_id: int, author: str,
+                       current: set[str]) -> int:
+    """Hide books on an author watch that aren't that author's audiobooks:
+    entries from before exact author matching (e.g. "Scott Meyers" on a
+    "Scott Meyer" watch) and podcasts. A book is kept if this check's fetch
+    returned it (`current`) or its credits name the author. Hidden the
+    normal way (Unhide works and sticks), never emailed."""
+    import audible_api  # (db stays importable on its own)
+    target = audible_api.norm_name(author)
+    stale = []
+    for b in books_for_watch(watch_id):
+        if b["keep_visible"] or b["asin"] in current:
+            continue
+        credited = audible_api._credited_names(
+            audible_api.split_authors(b["authors"]))
+        if target not in credited:
+            stale.append(b["asin"])
+    if stale:
+        with conn() as c:
+            c.executemany("UPDATE watch_books SET hidden = 1, is_new = 0, "
+                          "notified = 1, mismatch_hidden = 1 "
+                          "WHERE asin = ? AND watch_id = ? AND hidden = 0 "
+                          "AND keep_visible = 0",
+                          [(a, watch_id) for a in stale])
+    return len(stale)
+
+
+def hide_podcasts(watch_id: int, asins: set[str]) -> int:
+    """Hide podcasts linked to a watch (they aren't audiobooks)."""
+    if not asins:
+        return 0
+    with conn() as c:
+        cur = c.executemany("UPDATE watch_books SET hidden = 1, is_new = 0, "
+                            "notified = 1, mismatch_hidden = 1 "
+                            "WHERE asin = ? AND watch_id = ? AND hidden = 0 "
+                            "AND keep_visible = 0",
+                            [(a, watch_id) for a in asins])
+        return cur.rowcount
 
 
 def hide_placeholders(watch_id: int) -> int:
