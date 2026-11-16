@@ -1,0 +1,19 @@
+# Your data — never commit these
+watcher.db
+watcher.db*
+*.db-journal
+audible_auth.json
+*.bak
+*.log
+
+# Python / build
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.spec
+packaging/icon.ico
+packaging/Output/

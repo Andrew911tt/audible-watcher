@@ -1,0 +1,10 @@
+.git
+.github
+tests
+packaging
+__pycache__
+.pytest_cache
+watcher.db*
+audible_auth.json
+*.bak
+*.log

@@ -1,0 +1,12 @@
+# Copy to docker-compose.yml, set your time zone (the daily check runs at local time), then:
+#   docker compose up -d      ->  http://<server>:5055
+services:
+  audible-watcher:
+    build: .
+    container_name: audible-watcher
+    restart: unless-stopped
+    ports: ["5055:5055"]
+    environment:
+      - TZ=America/Los_Angeles
+    volumes:
+      - ./data:/data

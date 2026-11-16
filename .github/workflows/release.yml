@@ -1,0 +1,31 @@
+# Push a tag like v1.0.0 to build the Windows installer and attach it to a GitHub release.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pytest tests -q
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Build app and installer
+        shell: pwsh
+        run: |
+          $v = "${{ github.ref_name }}".TrimStart("v")
+          ./packaging/build_windows.ps1 -Version $v
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: packaging/Output/AudibleWatcher-Setup-*.exe
+          generate_release_notes: true

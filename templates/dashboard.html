@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% from "_macros.html" import book_card, group_section with context %}
+
+{% macro watch_table(rows) %}
+  <table class="watch-table">
+    <thead>
+      <tr><th>Type</th><th>Name</th><th>Titles</th><th>New</th>
+          <th>Pre-orders</th>
+          <th>Latest release</th><th>Last checked</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for w in rows %}
+      <tr {% if w.new_count %}class="row-new"{% endif %}>
+        <td><span class="pill pill-{{ w.type }}">{{ w.type }}</span></td>
+        <td><a href="{{ url_for('watch_detail', watch_id=w.id) }}">{{ w.name }}</a>
+            {% if w.last_error %}<span class="err" title="{{ w.last_error }}">⚠️</span>{% endif %}
+        </td>
+        <td>{{ w.book_count }}</td>
+        <td>{% if w.new_count %}<span class="badge">{{ w.new_count }}</span>{% else %}—{% endif %}</td>
+        <td>{% if w.preorder_count %}<span class="badge badge-preorder">{{ w.preorder_count }}</span>{% else %}—{% endif %}</td>
+        <td>{{ w.latest_release or '—' }}</td>
+        <td class="muted small">{{ w.last_checked_at or 'never' }}</td>
+        <td>
+          <form method="post" action="{{ url_for('delete_watch', watch_id=w.id) }}"
+                onsubmit="return confirm('Stop watching {{ w.name }}?')">
+            <button class="btn btn-small btn-danger" type="submit">Remove</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endmacro %}
+
+{% block content %}
+
+<div class="page-head">
+  <h1>Dashboard</h1>
+  <form method="post" action="{{ url_for('check_now') }}">
+    <button class="btn btn-primary" type="submit">Check Audible now</button>
+  </form>
+</div>
+
+{% if settings.email_enabled != '1' %}
+  <div class="notice">Email notifications are off — turn them on in
+    <a href="{{ url_for('settings_page') }}">Settings</a> to get emailed
+    when new books appear.</div>
+{% endif %}
+
+{% if fresh %}
+<section>
+  <div class="section-head">
+    <h2>🆕 New books <span class="badge">{{ fresh|length }}</span></h2>
+    <form method="post" action="{{ url_for('seen_all') }}">
+      <button class="btn btn-small" type="submit">Mark all seen</button>
+    </form>
+  </div>
+  <div class="book-grid">
+    {% for b in fresh %}{{ book_card(b, show_source=True) }}{% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<div class="view-toggle tabs">
+  <a class="btn {% if tab == 'authors' %}active{% endif %}"
+     href="{{ url_for('dashboard', tab='authors') }}">Authors
+     <span class="count">{{ authors|length }}</span></a>
+  <a class="btn {% if tab == 'series' %}active{% endif %}"
+     href="{{ url_for('dashboard', tab='series') }}">Series
+     <span class="count">{{ series|length }}</span></a>
+  <a class="btn {% if tab == 'preorders' %}active{% endif %}"
+     href="{{ url_for('dashboard', tab='preorders') }}">Pre-orders
+     <span class="count">{{ preorders|length }}</span></a>
+  <a class="btn {% if tab == 'library' %}active{% endif %}"
+     href="{{ url_for('dashboard', tab='library') }}">Library
+     <span class="count">{{ owned_total }}</span></a>
+</div>
+
+{% if tab == 'preorders' %}
+  {% if preorders %}
+    {% set from_series = preorders|selectattr('watch_type', 'equalto', 'series')|list %}
+    {% set from_authors = preorders|selectattr('watch_type', 'equalto', 'author')|list %}
+    {% if from_series %}
+      {{ group_section("From series you're following", from_series, show_source=True) }}
+    {% endif %}
+    {% if from_authors %}
+      {{ group_section("From authors you're following", from_authors, show_source=True) }}
+    {% endif %}
+  {% else %}
+  <p class="muted">No upcoming releases across your watches — yet.</p>
+  {% endif %}
+{% elif tab == 'library' %}
+  {% if owned %}
+  <div class="view-toggle">
+    <a class="btn btn-small {% if view == 'all' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library') }}">All books</a>
+    <a class="btn btn-small {% if view == 'author' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='author') }}">By author</a>
+    <a class="btn btn-small {% if view == 'series' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='series') }}">By series</a>
+  </div>
+  {% if view == 'series' %}
+  <div class="view-toggle sort-toggle">
+    <span class="muted small">Sort:</span>
+    <a class="btn btn-small {% if sort == 'recent' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='series') }}">Recent purchase</a>
+    <a class="btn btn-small {% if sort == 'newest' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='series', sort='newest') }}">Newest book</a>
+    <a class="btn btn-small {% if sort == 'largest' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='series', sort='largest') }}">Biggest series</a>
+    <a class="btn btn-small {% if sort == 'owned' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='series', sort='owned') }}">Most owned</a>
+  </div>
+  {% endif %}
+  {% if owned_groups %}
+    {% for group_name, group in owned_groups %}
+    {{ group_section(group_name, group,
+                     wtype=('author' if view == 'author' else 'series'),
+                     asin=(group[0].series_asin if view == 'series' else None),
+                     show_owned=False) }}
+    {% endfor %}
+  {% else %}
+  <div class="book-grid">
+    {% for b in owned %}{{ book_card(b, show_owned=False) }}{% endfor %}
+  </div>
+  {% endif %}
+  {% else %}
+  <p class="muted">No owned books synced yet —
+    <a href="{{ url_for('account_page') }}">connect your Audible account</a>
+    (or hit “Sync library now” on the Account page).</p>
+  {% endif %}
+{% elif tab == 'series' %}
+  {% if series %}{{ watch_table(series) }}
+  {% else %}
+  <p class="muted">No series watched yet —
+    <a href="{{ url_for('search', type='series') }}">add one</a>.</p>
+  {% endif %}
+{% else %}
+  {% if authors %}{{ watch_table(authors) }}
+  {% else %}
+  <p class="muted">No authors watched yet —
+    <a href="{{ url_for('search') }}">add your favorite authors</a>.</p>
+  {% endif %}
+{% endif %}
+
+{% if checks %}
+<section>
+  <h2>Recent checks</h2>
+  <table class="watch-table">
+    <thead><tr><th>When (UTC)</th><th>Trigger</th><th>New books</th>
+               <th>Email</th><th>Errors</th></tr></thead>
+    <tbody>
+      {% for c in checks %}
+      <tr>
+        <td class="small">{{ c.ran_at }}</td>
+        <td>{{ c.trigger }}</td>
+        <td>{{ c.new_books }}</td>
+        <td>{{ '✉️ sent' if c.email_sent else '—' }}</td>
+        <td class="small err">{{ c.errors or '' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+
+{% endblock %}

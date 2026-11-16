@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Add favorites — Audible Watcher{% endblock %}
+{% block content %}
+
+<h1>Add favorites</h1>
+<p class="muted">Search Audible for an author or a series, then add it to
+your watch list. Existing titles are recorded as your baseline; anything
+that appears later counts as new.</p>
+
+<form method="get" action="{{ url_for('search') }}" class="search-form">
+  <input type="text" name="q" value="{{ q }}" placeholder="e.g. Brandon Sanderson or Stormlight Archive" autofocus>
+  <button class="btn btn-primary" type="submit">Search</button>
+</form>
+
+{% if q and not results and not series_results %}
+  <p class="muted">No matching authors or series found.</p>
+{% endif %}
+
+{% if results %}
+  <h2>Author matches</h2>
+  <div class="result-list">
+    {% for r in results %}
+    <div class="result-card">
+      {% if r.sample and r.sample.image_url %}<img src="{{ r.sample.image_url }}" alt="">{% endif %}
+      <div>
+        <strong>{{ r.name }}</strong>
+        <div class="muted small">{{ r.count }} recent title(s) on Audible
+          {% if r.sample %}— latest: “{{ r.sample.title }}”
+          ({{ r.sample.release_date or 'TBA' }}){% endif %}</div>
+      </div>
+      <form method="post" action="{{ url_for('add_watch') }}">
+        <input type="hidden" name="type" value="author">
+        <input type="hidden" name="name" value="{{ r.name }}">
+        <button class="btn btn-primary btn-small" type="submit">Watch author</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% if series_results %}
+  <h2>Series matches</h2>
+  <div class="result-list">
+    {% for s in series_results %}
+    <div class="result-card">
+      {% if s.image_url %}<img src="{{ s.image_url }}" alt="">{% endif %}
+      <div>
+        <strong>{{ s.series_title }}</strong>
+        <div class="muted small">{{ s.count }} title(s) in search results
+          — e.g. by {{ s.sample_authors }}</div>
+      </div>
+      <form method="post" action="{{ url_for('add_watch') }}">
+        <input type="hidden" name="type" value="series">
+        <input type="hidden" name="name" value="{{ s.series_title }}">
+        <input type="hidden" name="asin" value="{{ s.series_asin }}">
+        <button class="btn btn-primary btn-small" type="submit">Watch series</button>
+      </form>
+    </div>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% endblock %}

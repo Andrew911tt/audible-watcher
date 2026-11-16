@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}Settings — Audible Watcher{% endblock %}
+{% block content %}
+
+<h1>Settings</h1>
+
+<form method="post" class="settings-form">
+  <fieldset>
+    <legend>Monitoring</legend>
+    <label>Audible marketplace
+      <select name="marketplace">
+        {% for m in marketplaces %}
+        <option value="{{ m }}" {% if settings.marketplace == m %}selected{% endif %}>{{ m }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>Language
+      <select name="language">
+        <option value="" {% if not settings.language %}selected{% endif %}>Any language</option>
+        {% for l in languages %}
+        <option value="{{ l }}" {% if settings.language == l %}selected{% endif %}>{{ l|capitalize }}</option>
+        {% endfor %}
+      </select>
+      <span class="muted small">Books in other languages are hidden
+        automatically — they go to each watch's hidden section instead of
+        your library and alerts.</span>
+    </label>
+    <label>Daily check time (hour, 0–23, local)
+      <input type="number" name="check_hour" min="0" max="23"
+             value="{{ settings.check_hour }}">
+    </label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Email notifications (Gmail)</legend>
+    <label class="checkbox">
+      <input type="checkbox" name="email_enabled"
+             {% if settings.email_enabled == '1' %}checked{% endif %}>
+      Send me an email when new books are found
+    </label>
+    <label>SMTP host
+      <input type="text" name="smtp_host" value="{{ settings.smtp_host }}">
+    </label>
+    <label>SMTP port
+      <input type="number" name="smtp_port" value="{{ settings.smtp_port }}">
+    </label>
+    <label>Security
+      <select name="smtp_security">
+        <option value="ssl" {% if settings.smtp_security == 'ssl' %}selected{% endif %}>SSL (port 465)</option>
+        <option value="starttls" {% if settings.smtp_security == 'starttls' %}selected{% endif %}>STARTTLS (port 587)</option>
+      </select>
+    </label>
+    <label>Gmail address (SMTP username)
+      <input type="email" name="smtp_user" value="{{ settings.smtp_user }}"
+             placeholder="you@gmail.com">
+    </label>
+    <label>Gmail app password
+      <input type="password" name="smtp_password"
+             placeholder="{% if settings.smtp_password %}•••••••• (leave blank to keep){% else %}16-character app password{% endif %}">
+      <span class="muted small">Create one at
+        myaccount.google.com → Security → 2-Step Verification → App passwords.
+        Your regular Gmail password will not work.</span>
+    </label>
+    <label>Send notifications to
+      <input type="text" name="email_to" value="{{ settings.email_to }}"
+             placeholder="you@example.com (comma-separate multiple)">
+    </label>
+    <label>From address (optional, defaults to Gmail address)
+      <input type="text" name="email_from" value="{{ settings.email_from }}">
+    </label>
+  </fieldset>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" type="submit">Save settings</button>
+  </div>
+</form>
+
+<form method="post" action="{{ url_for('test_email') }}" class="btn-row">
+  <button class="btn" type="submit">Send test email</button>
+</form>
+
+{% endblock %}

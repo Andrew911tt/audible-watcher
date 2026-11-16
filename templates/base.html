@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Audible Watcher{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <a class="brand" href="{{ url_for('dashboard') }}">🎧 Audible Watcher</a>
+  <nav>
+    <a href="{{ url_for('dashboard') }}">Dashboard</a>
+    <a href="{{ url_for('search') }}">Add favorites</a>
+    <a href="{{ url_for('account_page') }}">Account</a>
+    <a href="{{ url_for('settings_page') }}">Settings</a>
+  </nav>
+</header>
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    <div class="flashes">
+    {% for category, message in messages %}
+      <div class="flash flash-{{ category }}">{{ message }}</div>
+    {% endfor %}
+    </div>
+  {% endif %}
+{% endwith %}
+
+<main>
+  {% block content %}{% endblock %}
+</main>
+
+<script>
+// forms marked js-watch submit in the background so the page never reloads
+document.addEventListener('submit', async function (e) {
+  const form = e.target.closest('form.js-watch');
+  if (!form) return;
+  e.preventDefault();
+  const btn = form.querySelector('button');
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Adding…';
+  try {
+    const resp = await fetch(form.action, {
+      method: 'POST',
+      body: new FormData(form),
+      headers: {'X-Requested-With': 'fetch'}
+    });
+    const data = await resp.json();
+    if (!data.ok) throw new Error(data.error || 'request failed');
+    const link = document.createElement('a');
+    link.className = 'btn btn-small btn-watching';
+    link.href = data.watch_url;
+    link.textContent = 'Watching ✓';
+    if (data.message) link.title = data.message;
+    link.setAttribute('onclick', 'event.stopPropagation()');
+    form.replaceWith(link);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = original;
+    alert('Could not add watch: ' + err.message);
+  }
+});
+</script>
+</body>
+</html>

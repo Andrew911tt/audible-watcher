@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Audible account — Audible Watcher{% endblock %}
+{% block content %}
+
+<h1>Audible account</h1>
+
+{% if connected %}
+  <div class="notice">✅ Connected{% if name %} as <strong>{{ name }}</strong>{% endif %}
+    — {{ owned_count }} owned title(s)
+    {% if synced_at %}<span class="muted small">(last synced {{ synced_at }})</span>{% endif %}
+  </div>
+  <p class="muted">Books you own get an <span class="badge badge-owned">OWNED</span>
+    badge on watch pages. Re-sync after buying new books.</p>
+  <div class="btn-row">
+    <form method="post" action="{{ url_for('account_sync') }}" style="display:inline">
+      <button class="btn btn-primary" type="submit">Sync library now</button>
+    </form>
+    <form method="post" action="{{ url_for('account_disconnect') }}" style="display:inline"
+          onsubmit="return confirm('Disconnect your Audible account and remove owned-library data?')">
+      <button class="btn btn-danger" type="submit">Disconnect</button>
+    </form>
+  </div>
+  <p class="muted small">Your login happened on amazon.com — this app only
+    holds device tokens (in <code>audible_auth.json</code>), never your
+    password. Revoke them anytime from Amazon's
+    “Manage Your Content and Devices” page or the Disconnect button above.</p>
+
+{% elif login_url %}
+  <h2>Finish connecting</h2>
+  <ol class="connect-steps">
+    <li><a class="btn btn-primary" href="{{ login_url }}" target="_blank" rel="noopener">
+        Open the Amazon sign-in page</a>
+        <span class="muted small">— sign in there as usual (password, 2FA,
+        CAPTCHA all happen on amazon.com, never here).</span></li>
+    <li>After signing in you'll land on a mostly-blank Amazon page
+        (the address contains <code>/ap/maplanding</code>).
+        <strong>Copy that page's full URL</strong> from the address bar.</li>
+    <li>Paste it here:
+      <form method="post" action="{{ url_for('account_complete') }}" class="search-form">
+        <input type="text" name="response_url"
+               placeholder="https://www.amazon.com/ap/maplanding?...">
+        <button class="btn btn-primary" type="submit">Complete connection</button>
+      </form>
+    </li>
+  </ol>
+
+{% else %}
+  <p class="muted">Connect your Audible account to see which books you
+    already own. You sign in <strong>on amazon.com in your own browser</strong> —
+    this app never sees your password. It keeps only revocable device tokens,
+    the same way the official Audible app registers a device.</p>
+  <form method="post" action="{{ url_for('account_start') }}" class="btn-row">
+    <button class="btn btn-primary" type="submit">Connect Audible account</button>
+  </form>
+{% endif %}
+
+{% endblock %}

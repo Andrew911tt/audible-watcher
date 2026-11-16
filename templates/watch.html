@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}{{ watch.name }} — Audible Watcher{% endblock %}
+{% from "_macros.html" import book_card, group_section with context %}
+
+{% block content %}
+
+<div class="page-head">
+  <h1><span class="pill pill-{{ watch.type }}">{{ watch.type }}</span>
+      {{ watch.name }}</h1>
+  <div class="head-actions">
+    <form method="post"
+          action="{{ url_for('hide_duplicates', watch_id=watch.id) }}">
+      <button class="btn" type="submit"
+              title="Hide duplicate listings of the same book (keeps the one with a real release date)">
+        🧹 Clean up duplicates</button>
+    </form>
+    <a class="btn" href="{{ url_for('dashboard') }}">← Back</a>
+  </div>
+</div>
+<p class="muted small">Last checked: {{ watch.last_checked_at or 'never' }}
+  {% if watch.last_error %}<span class="err"> — last error: {{ watch.last_error }}</span>{% endif %}
+  {% if owned_asins %}
+    {% set owned_here = books|selectattr('asin', 'in', owned_asins)|list|length %}
+    — you own {{ owned_here }} of {{ books|length }}
+  {% endif %}
+</p>
+
+<div class="view-toggle">
+  <a class="btn btn-small {% if view != 'series' %}active{% endif %}"
+     href="{{ url_for('watch_detail', watch_id=watch.id) }}">All books</a>
+  <a class="btn btn-small {% if view == 'series' %}active{% endif %}"
+     href="{{ url_for('watch_detail', watch_id=watch.id, view='series') }}">By series</a>
+</div>
+
+{% if view == 'series' %}
+  {% for series_name, group in series_groups %}
+  {{ group_section(series_name, group, wtype='series') }}
+  {% else %}
+  <p class="muted">No titles recorded yet.</p>
+  {% endfor %}
+{% else %}
+  <div class="book-grid">
+    {% for b in books %}{{ book_card(b) }}
+    {% else %}
+    <p class="muted">No titles recorded yet.</p>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% if hidden_books %}
+<details class="hidden-books">
+  <summary>Hidden entries ({{ hidden_books|length }})</summary>
+  <ul>
+    {% for b in hidden_books %}
+    <li>
+      <span>{{ b.title }}
+        {% if b.series_sequence %}(Book {{ b.series_sequence }}){% endif %}
+        — 📅 {{ b.release_date or 'TBA' }}
+        {% if b.language %} · {{ b.language }}{% endif %}</span>
+      <form method="post"
+            action="{{ url_for('book_unhide', asin=b.asin, watch_id=b.watch_id) }}">
+        <button class="btn btn-small" type="submit">Unhide</button>
+      </form>
+    </li>
+    {% endfor %}
+  </ul>
+</details>
+{% endif %}
+
+{% endblock %}
