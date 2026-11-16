@@ -23,12 +23,22 @@
   {% endif %}
 </p>
 
+{% if watch.type == 'series' %}
+<div class="view-toggle sort-toggle">
+  <span class="muted small">Sort:</span>
+  <a class="btn btn-small {% if sort == 'series' %}active{% endif %}"
+     href="{{ url_for('watch_detail', watch_id=watch.id) }}">Series order</a>
+  <a class="btn btn-small {% if sort == 'published' %}active{% endif %}"
+     href="{{ url_for('watch_detail', watch_id=watch.id, sort='published') }}">Publication order</a>
+</div>
+{% else %}
 <div class="view-toggle">
   <a class="btn btn-small {% if view != 'series' %}active{% endif %}"
      href="{{ url_for('watch_detail', watch_id=watch.id) }}">All books</a>
   <a class="btn btn-small {% if view == 'series' %}active{% endif %}"
      href="{{ url_for('watch_detail', watch_id=watch.id, view='series') }}">By series</a>
 </div>
+{% endif %}
 
 {% if view == 'series' %}
   {% for series_name, group in series_groups %}

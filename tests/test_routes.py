@@ -285,3 +285,43 @@ def test_account_lives_on_the_settings_page(client):
 def test_account_section_is_first_on_settings(client):
     html = client.get("/settings").get_data(as_text=True)
     assert html.index('id="account"') < html.index('class="settings-form"')
+
+
+def _card_order(html, asins):
+    return sorted(asins, key=lambda a: html.index(f'/book/{a}/'))
+
+
+def test_series_page_sorts_in_series_and_publication_order(client, watched):
+    sid = watched["series"]
+    db.upsert_books(sid, [
+        {"asin": "S3", "title": "Third", "authors": "Test Author",
+         "series_title": "Great Series", "series_sequence": "3",
+         "release_date": "2019-01-01", "url": "u"},
+        {"asin": "S25", "title": "Novella", "authors": "Test Author",
+         "series_title": "Great Series", "series_sequence": "2.5",
+         "release_date": "2026-09-01", "url": "u"},
+        {"asin": "S1D", "title": "The First Book (Dramatized Adaptation)",
+         "authors": "Test Author", "series_title": "Great Series",
+         "series_sequence": "1", "release_date": "2023-09-12", "url": "u"},
+    ], as_new=False)
+    html = client.get(f"/watch/{sid}").get_data(as_text=True)
+    # series order: 1 (2024), 1 dramatized (2023 listing sorts by date: the
+    # 2023 one first), 2, 2.5, 3
+    assert _card_order(html, ["B001", "S1D", "B002", "S25", "S3"]) == \
+        ["S1D", "B001", "B002", "S25", "S3"]
+    assert "All books" not in html and "By series" not in html
+    assert "Series order" in html and "Publication order" in html
+    html = client.get(f"/watch/{sid}?sort=published").get_data(as_text=True)
+    assert _card_order(html, ["B001", "S1D", "B002", "S25", "S3"]) == \
+        ["S3", "S1D", "B001", "B002", "S25"]
+    # unknown sort and the old view parameter fall back to series order
+    assert client.get(f"/watch/{sid}?sort=x&view=series").status_code == 200
+
+
+def test_author_page_keeps_its_views_and_orders_each_series(client, watched):
+    aid = watched["author"]
+    html = client.get(f"/watch/{aid}").get_data(as_text=True)
+    assert "All books" in html and "By series" in html
+    assert "Series order" not in html
+    html = client.get(f"/watch/{aid}?view=series").get_data(as_text=True)
+    assert html.index("/book/B001/") < html.index("/book/B002/")  # book 1, 2

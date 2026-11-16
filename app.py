@@ -613,6 +613,22 @@ def _group_owned(owned: list[dict], view: str,
     return None
 
 
+WATCH_SERIES_SORTS = ("series", "published")
+
+
+def _series_order_key(b: dict) -> tuple:
+    """Series order: numbered books by number (unnumbered last), then the
+    versions of one book by release date (undated last), then title."""
+    return (_seq_key(b), b.get("release_date") or "9999",
+            (b.get("title") or "").casefold())
+
+
+def _publication_key(b: dict) -> tuple:
+    """Publication order: oldest release first; not yet dated last."""
+    return (b.get("release_date") or "9999", _seq_key(b),
+            (b.get("title") or "").casefold())
+
+
 @app.route("/watch/<int:watch_id>")
 def watch_detail(watch_id):
     w = db.get_watch(watch_id)
@@ -623,11 +639,23 @@ def watch_detail(watch_id):
     books = [b for b in every if not b["hidden"]]
     hidden_books = [b for b in every if b["hidden"]]
     view = request.args.get("view", "all")
+    sort = request.args.get("sort", "series")
     series_groups = None
-    if view == "series":
+    if w["type"] == "series":
+        # one series: no grouping, just its books in series order (book 1
+        # first, 2.5 between 2 and 3; versions of a book by release date)
+        # or in publication order (oldest first)
+        view = "all"
+        if sort not in WATCH_SERIES_SORTS:
+            sort = "series"
+        books = (sorted(books, key=_publication_key) if sort == "published"
+                 else sorted(books, key=_series_order_key))
+    elif view == "series":
         groups: dict[str, list] = {}
-        for b in books:  # already newest-first within the list
+        for b in books:
             groups.setdefault(b["series_title"] or "Standalone", []).append(b)
+        for grp in groups.values():  # each series in series order
+            grp.sort(key=_series_order_key)
         # series ordered by their individually newest book
         series_groups = sorted(
             groups.items(),
@@ -638,7 +666,7 @@ def watch_detail(watch_id):
                                                w["name"])
                    if w["type"] == "series" else None)
     return render_template("watch.html", watch=w, books=books,
-                           hidden_books=hidden_books, view=view,
+                           hidden_books=hidden_books, view=view, sort=sort,
                            series_groups=series_groups,
                            audible_url=audible_url,
                            settings_language=(db.get_settings().get(
