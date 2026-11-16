@@ -114,16 +114,17 @@ def test_secret_key_is_not_the_public_default():
     assert len(webapp.app.secret_key) >= 32
 
 
-# ---- 3. duplicate cleanup must not hide other series' books --------------
+# ---- 3. placeholder cleanup must not hide other series' books ------------
 
-def test_duplicate_cleanup_ignores_same_number_in_other_series(watched):
+def test_placeholder_cleanup_ignores_same_number_in_other_series(watched):
     aid = watched["author"]
     other = {"asin": "B010", "title": "Other Series Book One",
              "authors": "Test Author", "series_title": "Other Series",
-             "series_sequence": "1", "release_date": "2023-01-01",
+             "series_sequence": "1", "release_date": None,
              "url": "u"}
     db.upsert_books(aid, [other], as_new=False)
-    assert db.hide_duplicate_books(aid) == 0
+    # an undated book 1 of *another* series isn't a placeholder of B001
+    assert db.hide_placeholders(aid) == 0
     visible = {b["asin"] for b in db.books_for_watch(aid)}
     assert {"B001", "B010"} <= visible
 

@@ -152,11 +152,13 @@ def test_lockout_expires(client, monkeypatch):
     assert _login(client, "s3cret").status_code == 302
 
 
-def test_many_addresses_together_are_also_limited(client, monkeypatch):
+def test_other_addresses_cannot_lock_you_out(client, monkeypatch):
+    """No shared limit: wrong guesses from many addresses must not lock out
+    someone else (review 4: anyone on the network could lock everyone out)."""
     monkeypatch.setenv("AW_PASSWORD", "s3cret")
-    for i in range(webapp.GLOBAL_FREE_ATTEMPTS + 1):
+    for i in range(30):
         _login(client, "nope", ip=f"10.8.0.{i}")
-    assert _login(client, "s3cret", ip="10.8.1.1").status_code == 429
+    assert _login(client, "s3cret", ip="10.8.1.1").status_code == 302
 
 
 def test_wrong_password_does_not_sleep(client, monkeypatch):

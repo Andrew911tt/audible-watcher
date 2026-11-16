@@ -15,7 +15,7 @@ def test_hidden_books_never_resurrect_or_alert(watched):
     assert "B001" in {b["asin"] for b in db.books_for_watch(aid)}
 
 
-def test_duplicate_cleanup_keeps_dated_entry(watched):
+def test_placeholder_cleanup_keeps_dated_entry(watched):
     aid = watched["author"]
     dup = {"asin": "B001DUP", "title": "The First Book (Placeholder)",
            "authors": "Test Author", "narrators": "Test Narrator",
@@ -23,14 +23,14 @@ def test_duplicate_cleanup_keeps_dated_entry(watched):
            "release_date": None,
            "url": "https://example.com/B001DUP"}
     db.upsert_books(aid, [dup], as_new=True)
-    assert db.hide_duplicate_books(aid) == 1
+    assert db.hide_placeholders(aid) == 1
     visible = {b["asin"] for b in db.books_for_watch(aid)}
     assert "B001" in visible and "B001DUP" not in visible
     hidden = [b for b in db.books_for_watch(aid, include_hidden=True)
               if b["hidden"]]
     assert {b["asin"] for b in hidden} == {"B001DUP"}
     assert db.new_books(aid) == [], "hidden duplicate must not stay flagged"
-    assert db.hide_duplicate_books(aid) == 0, "second pass finds nothing"
+    assert db.hide_placeholders(aid) == 0, "second pass finds nothing"
 
 
 def test_hidden_state_is_per_watch(watched):

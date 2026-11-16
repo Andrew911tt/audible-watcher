@@ -41,6 +41,23 @@ check_data_dir_writable()
 db.init_db()
 # random per install, kept in the database so sessions survive restarts
 app.secret_key = db.secret_key()
+
+
+def _proxy_count() -> int:
+    """How many reverse proxies sit in front of the app (AW_PROXY_COUNT).
+    Only then are X-Forwarded-For/-Host/-Proto trusted, for exactly that
+    many hops: otherwise anyone could fake their address or hostname."""
+    try:
+        return max(0, int(os.environ.get("AW_PROXY_COUNT", "0") or 0))
+    except ValueError:
+        log.warning("AW_PROXY_COUNT must be a number; ignoring it")
+        return 0
+
+
+if _proxy_count():
+    from werkzeug.middleware.proxy_fix import ProxyFix
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=_proxy_count(),
+                            x_proto=_proxy_count(), x_host=_proxy_count())
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 _check_lock = threading.Lock()
@@ -168,32 +185,50 @@ def _safe_next(target: str | None) -> str:
 
 
 # Wrong passwords: after FREE_ATTEMPTS failures from one address, it must
-# wait, doubling each time (30 s, 1 min, 2 min ... up to 15 min). Guessing
-# is counted per address, and in total so many addresses can't share the
-# work. Nothing sleeps, so a flood of attempts can't stall the app.
+# wait, doubling each time (30 s, 1 min, 2 min ... up to 15 min). Counted
+# per address only: a shared limit would let anyone lock everyone out.
+# Nothing sleeps, so a flood of attempts can't stall the app. Behind a
+# reverse proxy, AW_PROXY_COUNT makes the address the visitor's own.
 FREE_ATTEMPTS = 5
 FIRST_LOCKOUT = 30          # seconds
 MAX_LOCKOUT = 15 * 60
-GLOBAL_FREE_ATTEMPTS = 20   # all addresses together
+FORGET_AFTER = 24 * 3600    # an address's failures are forgotten after this
+MAX_TRACKED = 10_000        # never remember more addresses than this
 _login_lock = threading.Lock()
-_login_failures: dict[str, tuple[int, float]] = {}  # key -> (count, until)
+# key -> (failures, locked until, last failure), times from time.monotonic()
+_login_failures: dict[str, tuple[int, float, float]] = {}
 
 
 def _lockout_left(key: str) -> int:
     with _login_lock:
-        _, until = _login_failures.get(key, (0, 0.0))
+        _, until, _ = _login_failures.get(key, (0, 0.0, 0.0))
     return max(0, int(until - time.monotonic() + 0.999))
 
 
-def _record_failure(key: str, free: int):
+def _forget_old_failures(now: float):
+    """Drop addresses that last failed long ago and aren't locked; if still
+    too many, drop the oldest. (Caller holds _login_lock.)"""
+    stale = [k for k, (_, until, last) in _login_failures.items()
+             if until <= now and now - last > FORGET_AFTER]
+    for k in stale:
+        del _login_failures[k]
+    if len(_login_failures) > MAX_TRACKED:
+        oldest = sorted(_login_failures, key=lambda k: _login_failures[k][2])
+        for k in oldest[:len(_login_failures) - MAX_TRACKED]:
+            del _login_failures[k]
+
+
+def _record_failure(key: str, free: int = FREE_ATTEMPTS):
     with _login_lock:
-        count, _ = _login_failures.get(key, (0, 0.0))
+        now = time.monotonic()
+        count, _, _ = _login_failures.get(key, (0, 0.0, 0.0))
         count += 1
         until = 0.0
         if count > free:
             wait = min(FIRST_LOCKOUT * 2 ** (count - free - 1), MAX_LOCKOUT)
-            until = time.monotonic() + wait
-        _login_failures[key] = (count, until)
+            until = now + wait
+        _login_failures[key] = (count, until, now)
+        _forget_old_failures(now)  # after adding: never above MAX_TRACKED
 
 
 def _clear_failures(key: str):
@@ -256,8 +291,8 @@ def csrf_protect():
 
 def _watches_by_key() -> dict:
     if "watches_by_key" not in g:
-        g.watches_by_key = {(w["type"], w["name"].strip().lower()): w["id"]
-                            for w in db.list_watches()}
+        g.watches_by_key = {(w["type"], w["name"].strip().casefold()):
+                            w["id"] for w in db.list_watches()}
     return g.watches_by_key
 
 
@@ -307,7 +342,7 @@ def has_owned() -> bool:
 
 def watch_id_for(wtype, name):
     """The existing watch's id for (type, name), or None."""
-    return _watches_by_key().get((wtype, (name or "").strip().lower()))
+    return _watches_by_key().get((wtype, (name or "").strip().casefold()))
 
 
 def audible_series_url(series_asin, series_title=""):
@@ -830,17 +865,6 @@ def book_unhide(asin, watch_id):
                                                 watch_id=watch_id))
 
 
-@app.route("/watch/<int:watch_id>/hide-duplicates", methods=["POST"])
-def hide_duplicates(watch_id):
-    n = db.hide_duplicate_books(watch_id)
-    if n:
-        flash(f"Cleaned up {n} duplicate entr{'y' if n == 1 else 'ies'} — "
-              "they're in the hidden section below if you want any back", "ok")
-    else:
-        flash("No duplicates found", "ok")
-    return redirect(url_for("watch_detail", watch_id=watch_id))
-
-
 @app.route("/seen-all", methods=["POST"])
 def seen_all():
     db.mark_all_seen()
@@ -932,7 +956,7 @@ def login():
     error = None
     if request.method == "POST":
         who = f"ip:{request.remote_addr}"
-        wait = max(_lockout_left(who), _lockout_left("all"))
+        wait = _lockout_left(who)
         if wait:
             error = (f"Too many wrong passwords. Wait {wait} seconds, then "
                      "try again.")
@@ -945,8 +969,7 @@ def login():
             session.permanent = True  # stay signed in for 30 days
             return redirect(_safe_next(request.form.get("next")))
         log.warning("Failed sign-in from %s", request.remote_addr)
-        _record_failure(who, FREE_ATTEMPTS)
-        _record_failure("all", GLOBAL_FREE_ATTEMPTS)
+        _record_failure(who)
         error = "That password isn't right."
     # keep where the user was heading across a wrong attempt
     return render_template("login.html", error=error,

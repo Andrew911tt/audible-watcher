@@ -11,7 +11,8 @@ credentials, no scraping of web pages. Everything runs on your own computer.
 
 - **Audible's catalog API** — searches for the authors and series you watch.
 - **Google Books and Open Library** — a book's title and first author, to
-  show when it first came out in print. You can turn this off in Settings.
+  show when it first came out in print. You can turn this off: Settings →
+  Monitoring → untick "Show when books first came out in print".
 - **Amazon's image servers** — your browser loads the cover pictures.
 - **Amazon sign-in** — only if you connect your Audible account (optional).
 - **Your own email server** — to send you the notification emails.
@@ -193,6 +194,7 @@ sudo systemctl enable --now audible-watcher
 | `AW_DATA_DIR` | see above | Folder for `watcher.db` and `audible_auth.json`. |
 | `AW_ALLOWED_HOSTS` | *(empty)* | Extra hostnames you open the app by, comma-separated (e.g. `nas.example.com`). IP addresses, `localhost`, names without a dot and `.local` / `.lan` / `.home` / `.home.arpa` / `.internal` names always work. Other names are refused, which blocks websites that try to reach the app through your browser (DNS rebinding). See [Opening it from other devices](#opening-it-from-other-devices). |
 | `AW_PASSWORD` | *(empty)* | Set it to require a password to open the app. Recommended if anyone you don't trust can reach it. See [Opening it from other devices](#opening-it-from-other-devices). |
+| `AW_PROXY_COUNT` | `0` | Only if the app sits behind a reverse proxy (nginx, Caddy, Traefik…): how many proxies are in front of it. The app then sees each visitor's real address, so a wrong-password lockout only affects that visitor. Leave it at 0 otherwise: it makes the app trust forwarded headers. |
 
 How to set an environment variable depends on how you installed the app —
 the next section has the exact steps for each.
@@ -294,7 +296,9 @@ python app.py
 once and then stays signed in for 30 days (**Sign out** is in the menu).
 Changing the password signs every device out. After 5 wrong passwords from
 one address it has to wait before trying again (30 seconds, doubling up to
-15 minutes), and many addresses together are limited too.
+15 minutes); other addresses aren't affected. Behind a reverse proxy, set
+`AW_PROXY_COUNT` (see the settings table) so each visitor is counted
+separately.
 
 ## Notes
 

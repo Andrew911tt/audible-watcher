@@ -63,7 +63,8 @@ def verify_market_availability(limit: int = 50):
             log.info("Hidden %r (%s) — not sold on this marketplace",
                      r["title"], r["asin"])
         else:
-            # present, or search couldn't say: keep it and stop rechecking
+            # sold here, or the search couldn't say (None): no conclusion
+            # never hides a book, so it stays as it is — visible
             db.set_availability(r["asin"], True)
         time.sleep(0.3)  # be polite
 
@@ -165,6 +166,10 @@ def recheck_not_sold_here(marketplace: str, limit: int = 20) -> int:
         except audible_api.AudibleAPIError:
             log.info("Store re-check unavailable — trying again next check")
             break
+        # ok is None when the store search returns nothing at all: no
+        # conclusion, so the book keeps its current state (here: hidden)
+        # and is asked about again next week. The first check follows the
+        # same rule from the other side: no conclusion keeps a book visible.
         if ok:
             n = db.restore_now_available(r["asin"])
             restored += 1
@@ -223,21 +228,20 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
     """
     marketplace = settings.get("marketplace", "us")
     first_fetch = not w.get("baselined_at")
-    if first_fetch and w["type"] == "series":
-        # each Audible store has its own series IDs: after a marketplace
-        # change the stored one finds nothing, so look it up in this store
-        try:
-            asin = audible_api.resolve_series_asin(w["name"], marketplace)
-        except audible_api.AudibleUnavailable:
-            raise
-        except audible_api.AudibleAPIError:
-            asin = None
+    books = audible_api.fetch_watch_books(
+        w["type"], w["name"], w["asin"], marketplace)
+    if first_fetch and w["type"] == "series" and not books:
+        # Each Audible store has its own series IDs, so after a marketplace
+        # change the stored one finds nothing: look the series up in this
+        # store. Only then — an ID that still works is never second-guessed
+        # (another series may share the name).
+        asin = _resolve_same_series(w, marketplace)
         if asin and asin != w.get("asin"):
             log.info("Series %r is %s in this store", w["name"], asin)
             db.set_watch_asin(w["id"], asin)
             w = dict(w, asin=asin)
-    books = audible_api.fetch_watch_books(
-        w["type"], w["name"], w["asin"], marketplace)
+            books = audible_api.fetch_watch_books(
+                w["type"], w["name"], w["asin"], marketplace)
     keep, foreign = _split_by_language(books, settings)
     _store_foreign(w["id"], foreign)
     updated_fetch = (not first_fetch and (w.get("fetch_rev") or 0)
@@ -254,6 +258,14 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
     else:
         fresh = db.upsert_books(w["id"], keep, as_new=True)
     db.set_fetch_rev(w["id"], audible_api.FETCH_REVISION)
+    stubs = db.hide_placeholders(w["id"])
+    if stubs:
+        log.info("Watch %r: hid %d no-date placeholder(s) of dated books",
+                 w["name"], stubs)
+    fresh = [b for b in fresh if b["asin"] not in
+             {x["asin"] for x in db.books_for_watch(w["id"],
+                                                    include_hidden=True)
+              if x["placeholder_hidden"]}]
     if first_fetch:
         db.mark_baselined(w["id"])
         if books:  # leave nothing from the previous store on the page
@@ -266,6 +278,32 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
             ensure_series_author(w["id"])
     db.mark_watch_checked(w["id"], _empty_note(w, books))
     return [] if first_fetch else fresh
+
+
+def _resolve_same_series(w: dict, marketplace: str) -> str | None:
+    """This store's ID for the watched series: a series with exactly this
+    name whose authors match the books already on the watch. With no books
+    to compare, only an unambiguous name counts; if several series share
+    the name, nothing is guessed."""
+    try:
+        candidates = [
+            c for c in audible_api.search_series_candidates(w["name"],
+                                                            marketplace)
+            if (c["series_title"] or "").strip().casefold()
+            == w["name"].strip().casefold()]
+    except audible_api.AudibleUnavailable:
+        raise
+    except audible_api.AudibleAPIError:
+        return None
+    known = {audible_api.norm_name(a)
+             for b in db.books_for_watch(w["id"], include_hidden=True)
+             for a in audible_api.split_authors(b["authors"])}
+    if known:
+        matching = [c for c in candidates
+                    if known & {audible_api.norm_name(a) for a in
+                                audible_api.split_authors(c["sample_authors"])}]
+        return matching[0]["series_asin"] if len(matching) == 1 else None
+    return candidates[0]["series_asin"] if len(candidates) == 1 else None
 
 
 def _primary_author(watch_id: int) -> str | None:
@@ -402,6 +440,7 @@ def baseline_watch(watch_id: int) -> int:
     keep, foreign = _split_by_language(books, settings)
     _store_foreign(watch_id, foreign)
     inserted = db.upsert_books(watch_id, keep, as_new=False)
+    db.hide_placeholders(watch_id)
     db.mark_baselined(watch_id)
     db.set_fetch_rev(watch_id, audible_api.FETCH_REVISION)
     db.mark_watch_checked(watch_id, _empty_note(w, books))

@@ -12,12 +12,6 @@
     <a class="btn" href="{{ audible_url }}" target="_blank" rel="noopener"
        title="Open this series in the Audible store">View on Audible ↗</a>
     {% endif %}
-    <form method="post"
-          action="{{ url_for('hide_duplicates', watch_id=watch.id) }}">
-      <button class="btn" type="submit"
-              title="Hide duplicate listings of the same book (keeps the one with a real release date)">
-        🧹 Clean up duplicates</button>
-    {{ csrf_field() }}</form>
     <a class="btn" href="{{ url_for('dashboard') }}">← Back</a>
   </div>
 </div>
@@ -67,10 +61,12 @@
           {%- if b.available_checked_at %} (checked {{ b.available_checked_at|localtime }}; checked again weekly){% endif %}
         {%- elif b.store_hidden -%}
           · edition from your previous Audible store
+        {%- elif b.placeholder_hidden -%}
+          · placeholder without a release date (the dated listing is shown)
         {%- elif b.language and settings_language and b.language|lower != settings_language -%}
           · not in your language
         {%- else -%}
-          · hidden by you or as a duplicate
+          · hidden by you (or by an earlier duplicate clean-up)
         {%- endif -%}
         </span></span>
       <form method="post"

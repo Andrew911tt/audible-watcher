@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -69,6 +70,10 @@ CREATE TABLE IF NOT EXISTS watch_books (
                                                -- edition (marketplace change)
     region_hidden INTEGER NOT NULL DEFAULT 0,  -- hidden as not sold in this
                                                -- store; re-checked weekly
+    placeholder_hidden INTEGER NOT NULL DEFAULT 0,  -- no-date stub of a
+                                               -- dated listing
+    keep_visible  INTEGER NOT NULL DEFAULT 0,  -- you unhid it: never hide
+                                               -- it again automatically
     PRIMARY KEY (asin, watch_id)
 );
 
@@ -187,6 +192,10 @@ def init_db():
         if "store_hidden" not in link_cols:
             c.execute("ALTER TABLE watch_books ADD COLUMN store_hidden "
                       "INTEGER NOT NULL DEFAULT 0")
+        for col in ("placeholder_hidden", "keep_visible"):
+            if col not in link_cols:
+                c.execute(f"ALTER TABLE watch_books ADD COLUMN {col} "
+                          "INTEGER NOT NULL DEFAULT 0")
         if "region_hidden" not in link_cols:
             c.execute("ALTER TABLE watch_books ADD COLUMN region_hidden "
                       "INTEGER NOT NULL DEFAULT 0")
@@ -337,12 +346,16 @@ def set_watch_asin(watch_id: int, asin: str | None):
 
 
 def find_watch(wtype: str, name: str) -> int | None:
-    """The id of an existing watch (name compared ignoring case), or None."""
+    """The id of an existing watch (name compared ignoring case, including
+    accented letters: "Åsa" == "åsa"), or None."""
+    want = (name or "").strip().casefold()
     with conn() as c:
-        r = c.execute("SELECT id FROM watches WHERE type = ? "
-                      "AND lower(trim(name)) = lower(trim(?))",
-                      (wtype, name)).fetchone()
-    return r["id"] if r else None
+        rows = c.execute("SELECT id, name FROM watches WHERE type = ?",
+                         (wtype,)).fetchall()
+    for r in rows:
+        if r["name"].strip().casefold() == want:
+            return r["id"]
+    return None
 
 
 def hide_other_store_links(watch_id: int, prefix: str) -> int:
@@ -478,6 +491,7 @@ def hide_books(watch_id: int, asins: list[str]):
 def books_for_watch(watch_id: int, include_hidden: bool = False) -> list[dict]:
     q = ("SELECT b.*, wb.watch_id, wb.discovered_at, wb.is_new, "
          "wb.notified, wb.hidden, wb.store_hidden, wb.region_hidden, "
+         "wb.placeholder_hidden, wb.keep_visible, "
          "w.name AS watch_name, "
          "w.type AS watch_type, w.asin AS watch_asin "
          "FROM books b JOIN watch_books wb ON wb.asin = b.asin "
@@ -629,8 +643,8 @@ def hide_asin_everywhere(asin: str):
     then)."""
     with conn() as c:
         c.execute("UPDATE watch_books SET hidden = 1, region_hidden = 1, "
-                  "is_new = 0, notified = 1 WHERE asin = ? AND hidden = 0",
-                  (asin,))
+                  "is_new = 0, notified = 1 WHERE asin = ? AND hidden = 0 "
+                  "AND keep_visible = 0", (asin,))
 
 
 def series_sizes() -> dict[str, int]:
@@ -701,39 +715,60 @@ def set_book_hidden(asin: str, watch_id: int, hidden: bool):
         if hidden:
             c.execute(_HIDE + "asin = ? AND watch_id = ?", (asin, watch_id))
             c.execute("UPDATE watch_books SET region_hidden = 0, "
-                      "store_hidden = 0 WHERE asin = ? AND watch_id = ?",
+                      "store_hidden = 0, placeholder_hidden = 0, "
+                      "keep_visible = 0 WHERE asin = ? AND watch_id = ?",
                       (asin, watch_id))
         else:
             c.execute("UPDATE watch_books SET hidden = 0, region_hidden = 0, "
-                      "store_hidden = 0 WHERE asin = ? AND watch_id = ?",
+                      "store_hidden = 0, placeholder_hidden = 0, "
+                      "keep_visible = 1 WHERE asin = ? AND watch_id = ?",
                       (asin, watch_id))
 
 
-def hide_duplicate_books(watch_id: int) -> int:
-    """Hide duplicate catalog entries for a watch, keeping one book per
-    (series, sequence) — or per title when there is no sequence. An author
-    watch spans several series, so book 1 of one series is not a duplicate
-    of book 1 of another. An entry with a real release date beats a TBA
-    placeholder; then earlier releases win."""
+# Versions that are separate products even with the same series number:
+# a no-date stub of one is never matched against a dated listing of another.
+_ALT_VERSION = re.compile(
+    r"dramati[sz]ed|full[- ]cast|adaptation|radio (drama|play)|graphic ?audio",
+    re.IGNORECASE)
+
+
+def _is_alt_version(title: str | None) -> bool:
+    return bool(_ALT_VERSION.search(title or ""))
+
+
+def hide_placeholders(watch_id: int) -> int:
+    """Hide no-date placeholders on a watch: an entry without a release date
+    when the same series and book number already has a dated listing of the
+    same kind (e.g. a "Defiant" stub next to the real Skyward #4). Hidden
+    the normal way, so it shows under Hidden entries with Unhide; a book
+    you unhid yourself is never hidden again, and it's marked notified so
+    a placeholder is never emailed.
+
+    Alternate versions are never touched: they're dated listings of their
+    own (dramatized adaptations, other narrators, re-releases)."""
     groups: dict = {}
     for b in books_for_watch(watch_id):
-        key = (("seq", (b["series_title"] or "").strip().lower(),
-                b["series_sequence"].strip())
-               if b["series_sequence"]
-               else ("title", (b["title"] or "").strip().lower()))
+        seq = (b["series_sequence"] or "").strip()
+        if not seq:
+            continue
+        key = ((b["series_title"] or "").strip().casefold(), seq)
         groups.setdefault(key, []).append(b)
-    hidden = 0
-    with conn() as c:
-        for grp in groups.values():
-            grp.sort(key=lambda b: (b["release_date"] is None,
-                                    b["release_date"] or "",
-                                    b["discovered_at"]))
-            for b in grp[1:]:
-                c.execute(_HIDE + "asin = ? AND watch_id = ?",
-                          (b["asin"], watch_id))
-                hidden += 1
-    return hidden
-
+    stubs = []
+    for group in groups.values():
+        dated_kinds = {_is_alt_version(b["title"]) for b in group
+                       if b["release_date"]}
+        for b in group:
+            if (not b["release_date"] and not b["keep_visible"]
+                    and _is_alt_version(b["title"]) in dated_kinds):
+                stubs.append(b["asin"])
+    if stubs:
+        with conn() as c:
+            c.executemany("UPDATE watch_books SET hidden = 1, is_new = 0, "
+                          "notified = 1, placeholder_hidden = 1 "
+                          "WHERE asin = ? AND watch_id = ? AND hidden = 0 "
+                          "AND keep_visible = 0",
+                          [(a, watch_id) for a in stubs])
+    return len(stubs)
 
 def mark_all_seen(watch_id: int | None = None):
     with conn() as c:
@@ -780,6 +815,14 @@ def owned_books_list() -> list[dict]:
                      CASE WHEN upcoming THEN release_date END,
                      (purchase_date IS NULL), purchase_date DESC,
                      title COLLATE NOCASE""", (today,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def owned_preorders() -> list[dict]:
+    """The pre-order rows from the last library sync."""
+    with conn() as c:
+        rows = c.execute("SELECT * FROM owned_books WHERE preordered = 1"
+                         ).fetchall()
     return [dict(r) for r in rows]
 
 

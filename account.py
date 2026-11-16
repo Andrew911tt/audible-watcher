@@ -179,6 +179,7 @@ def sync_library() -> int:
     auth = audible.Authenticator.from_file(AUTH_FILE)
     marketplace = db.get_settings().get("marketplace", "us")
     items = []
+    orders_failed = False
     try:
         with audible.Client(auth=auth) as client:
             page = 1
@@ -195,8 +196,10 @@ def sync_library() -> int:
             try:
                 preordered = _preordered_asins(client)
             except Exception:  # noqa: BLE001 - orders feed is best-effort
-                log.exception("Could not read the orders feed for pre-orders")
+                log.exception("Could not read the orders feed for pre-orders;"
+                              " keeping the pre-orders from the last sync")
                 preordered = []
+                orders_failed = True
     finally:
         # the client may have refreshed the access token even if the sync
         # failed part-way; keep it either way
@@ -211,6 +214,13 @@ def sync_library() -> int:
     # pre-orders aren't in the library yet — pull their details from the
     # public catalog so they show up properly
     in_library = {b["asin"] for b in rows}
+    if orders_failed:
+        # one Amazon hiccup mustn't wipe them: keep the last known
+        # pre-orders until a sync can read the order list again
+        for b in db.owned_preorders():
+            if b["asin"] not in in_library:
+                rows.append(b)
+                in_library.add(b["asin"])
     pending = [a for a in preordered if a not in in_library]
     if pending:
         details = {}
