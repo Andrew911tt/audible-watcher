@@ -24,7 +24,7 @@
           <form method="post" action="{{ url_for('delete_watch', watch_id=w.id) }}"
                 onsubmit="return confirm('Stop watching {{ w.name }}?')">
             <button class="btn btn-small btn-danger" type="submit">Remove</button>
-          </form>
+          {{ csrf_field() }}</form>
         </td>
       </tr>
       {% endfor %}
@@ -38,7 +38,7 @@
   <h1>Dashboard</h1>
   <form method="post" action="{{ url_for('check_now') }}">
     <button class="btn btn-primary" type="submit">Check Audible now</button>
-  </form>
+  {{ csrf_field() }}</form>
 </div>
 
 {% if settings.email_enabled != '1' %}
@@ -53,7 +53,7 @@
     <h2>🆕 New books <span class="badge">{{ fresh|length }}</span></h2>
     <form method="post" action="{{ url_for('seen_all') }}">
       <button class="btn btn-small" type="submit">Mark all seen</button>
-    </form>
+    {{ csrf_field() }}</form>
   </div>
   <div class="book-grid">
     {% for b in fresh %}{{ book_card(b, show_source=True) }}{% endfor %}

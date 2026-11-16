@@ -96,6 +96,53 @@ def _store_foreign(watch_id: int, foreign: list[dict]):
         db.hide_books(watch_id, [b["asin"] for b in foreign])
 
 
+def _sold_here(pending: list[dict], marketplace: str) -> list[dict]:
+    """The pending rows that are safe to email: books confirmed as sold in
+    this marketplace. Series relationships include other regions' editions,
+    so an unverified book is checked now, before anything is sent.
+
+    Held back for a later check (left unnotified): books with no release
+    date yet (absent from the store search proves nothing until they have
+    one) and books whose lookup failed. Editions not sold here are hidden
+    everywhere and never emailed.
+    """
+    verdict: dict[str, bool] = {}
+    api_down = False
+    for b in pending:
+        asin = b["asin"]
+        if asin in verdict:
+            continue
+        if b.get("available") is not None:
+            verdict[asin] = bool(b["available"])
+        elif not b.get("release_date") or api_down:
+            verdict[asin] = False  # hold until it can be verified
+        else:
+            author = (b.get("authors") or "").split(",")[0].strip() or None
+            try:
+                ok = audible_api.check_market_availability(
+                    asin, b["title"], author, marketplace)
+            except audible_api.AudibleAPIError:
+                log.info("Availability check failed — holding new-book "
+                         "emails until the next check")
+                api_down = True
+                verdict[asin] = False
+                continue
+            if ok is False:
+                db.set_availability(asin, False)
+                db.hide_asin_everywhere(asin)
+                log.info("Not emailing %r (%s) — not sold on this "
+                         "marketplace", b["title"], asin)
+            else:  # present, or the search couldn't say: keep it
+                db.set_availability(asin, True)
+            verdict[asin] = ok is not False
+            time.sleep(0.3)  # be polite
+    held = {a for a, ok in verdict.items() if not ok}
+    if held:
+        log.info("Holding %d new book(s) back from email until verified",
+                 len(held))
+    return [b for b in pending if verdict[b["asin"]]]
+
+
 def check_all(trigger: str = "manual") -> dict:
     """Check every watch for new books, send one digest email if any found."""
     settings = db.get_settings()
@@ -124,13 +171,15 @@ def check_all(trigger: str = "manual") -> dict:
     email_sent = False
     pending = db.unnotified_books()
     if pending and settings.get("email_enabled") == "1":
-        try:
-            send_new_release_email(db.dedupe_by_asin(pending), settings)
-            db.mark_notified([(b["asin"], b["watch_id"]) for b in pending])
-            email_sent = True
-        except Exception as e:  # noqa: BLE001
-            log.exception("Email send failed")
-            errors.append(f"email: {e}")
+        ready = _sold_here(pending, marketplace)
+        if ready:
+            try:
+                send_new_release_email(db.dedupe_by_asin(ready), settings)
+                db.mark_notified([(b["asin"], b["watch_id"]) for b in ready])
+                email_sent = True
+            except Exception as e:  # noqa: BLE001
+                log.exception("Email send failed")
+                errors.append(f"email: {e}")
 
     db.log_check(trigger, total_new, "; ".join(errors) or None, email_sent)
     return {"new_books": total_new, "errors": errors, "email_sent": email_sent}

@@ -23,6 +23,7 @@ import db  # noqa: E402
 import app as webapp  # noqa: E402
 
 import pytest  # noqa: E402
+from flask.testing import FlaskClient  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +39,32 @@ def fresh_db(tmp_path, monkeypatch):
     yield
 
 
+TEST_CSRF_TOKEN = "test-csrf-token"
+
+
+class CSRFClient(FlaskClient):
+    """Test client that behaves like the app's own pages: every POST carries
+    the session's CSRF token unless the test supplies its own."""
+
+    def open(self, *args, **kwargs):
+        data = kwargs.get("data")
+        if (kwargs.get("method", "GET").upper() == "POST"
+                and isinstance(data, dict) and "csrf_token" not in data):
+            kwargs["data"] = {**data, "csrf_token": TEST_CSRF_TOKEN}
+        return super().open(*args, **kwargs)
+
+
 @pytest.fixture
 def client():
+    c = CSRFClient(webapp.app, webapp.app.response_class, use_cookies=True)
+    with c.session_transaction() as s:
+        s["csrf_token"] = TEST_CSRF_TOKEN
+    return c
+
+
+@pytest.fixture
+def raw_client():
+    """A client with no CSRF token, like a forged cross-site request."""
     return webapp.app.test_client()
 
 

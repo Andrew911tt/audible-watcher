@@ -8,12 +8,15 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import threading
 from datetime import date
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from flask import (Flask, flash, redirect, render_template, request, url_for)
+from flask import (Flask, flash, redirect, render_template, request, session,
+                   url_for)
+from markupsafe import Markup
 
 import account
 import audible_api
@@ -28,11 +31,53 @@ log = logging.getLogger("watcher")
 app = Flask(__name__,
             template_folder=os.path.join(RESOURCE_DIR, "templates"),
             static_folder=os.path.join(RESOURCE_DIR, "static"))
-app.secret_key = "audible-watcher-local"  # local single-user app
 db.init_db()
+# random per install, kept in the database so sessions survive restarts
+app.secret_key = db.secret_key()
+app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 _check_lock = threading.Lock()
 scheduler = BackgroundScheduler()
+
+DEFAULT_CHECK_HOUR = 8
+
+
+# ------------------------------------------------------------------ CSRF
+# There is no login, so without this any web page the user visits could
+# make their browser POST here (change settings, send the saved SMTP
+# password to another server via "Send test email", delete watches...).
+# Every state-changing request must carry the token from the user's session.
+
+def csrf_token() -> str:
+    token = session.get("csrf_token")
+    if not token:
+        token = session["csrf_token"] = secrets.token_urlsafe(32)
+    return token
+
+
+def csrf_field() -> Markup:
+    return Markup('<input type="hidden" name="csrf_token" value="%s">'
+                  % csrf_token())
+
+
+app.jinja_env.globals["csrf_field"] = csrf_field
+
+
+@app.before_request
+def csrf_protect():
+    if request.method != "POST":
+        return None
+    sent = (request.form.get("csrf_token")
+            or request.headers.get("X-CSRF-Token") or "")
+    expected = session.get("csrf_token") or ""
+    if expected and secrets.compare_digest(sent, expected):
+        return None
+    log.warning("Rejected POST %s without a valid CSRF token", request.path)
+    msg = ("This request didn't come from an Audible Watcher page (or your "
+           "session expired). Reload the page and try again.")
+    if request.headers.get("X-Requested-With") == "fetch":
+        return {"ok": False, "error": msg}, 400
+    return msg, 400, {"Content-Type": "text/plain; charset=utf-8"}
 
 
 @app.context_processor
@@ -84,8 +129,21 @@ def scheduled_check():
             _check_lock.release()
 
 
+def _parse_hour(value) -> int | None:
+    """A valid daily-check hour (0-23), or None."""
+    value = str(value or "").strip()
+    if value.isdigit() and 0 <= int(value) <= 23:
+        return int(value)
+    return None
+
+
 def reschedule():
-    hour = int(db.get_settings().get("check_hour", "8"))
+    raw = db.get_settings().get("check_hour")
+    hour = _parse_hour(raw)
+    if hour is None:  # never let a bad stored value stop the app starting
+        log.warning("Invalid check_hour %r in settings; using %02d:00",
+                    raw, DEFAULT_CHECK_HOUR)
+        hour = DEFAULT_CHECK_HOUR
     scheduler.remove_all_jobs()
     scheduler.add_job(scheduled_check, CronTrigger(hour=hour, minute=0),
                       id="daily_check")
@@ -229,9 +287,23 @@ def settings_page():
                 "smtp_port", "smtp_security", "smtp_user", "email_from",
                 "email_to"]
         values = {k: request.form.get(k, "").strip() for k in keys}
+        if _parse_hour(values["check_hour"]) is None:
+            flash("Daily check time must be a whole hour from 0 to 23 — "
+                  "settings not saved", "error")
+            return redirect(url_for("settings_page"))
+        values["check_hour"] = str(_parse_hour(values["check_hour"]))
+        current = db.get_settings()
         pw = request.form.get("smtp_password", "")
-        if pw:  # blank = keep existing
+        if pw:  # blank = keep existing...
             values["smtp_password"] = pw
+        elif (values["smtp_host"] != current.get("smtp_host")
+              or values["smtp_user"] != current.get("smtp_user")):
+            # ...but only for the server/account it was entered for, so the
+            # saved app password can never be redirected to another server
+            values["smtp_password"] = ""
+            if current.get("smtp_password"):
+                flash("Mail server or username changed — enter the app "
+                      "password again", "error")
         values["email_enabled"] = "1" if request.form.get("email_enabled") else "0"
         db.save_settings(values)
         reschedule()

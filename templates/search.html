@@ -32,7 +32,7 @@ that appears later counts as new.</p>
         <input type="hidden" name="type" value="author">
         <input type="hidden" name="name" value="{{ r.name }}">
         <button class="btn btn-primary btn-small" type="submit">Watch author</button>
-      </form>
+      {{ csrf_field() }}</form>
     </div>
     {% endfor %}
   </div>
@@ -54,7 +54,7 @@ that appears later counts as new.</p>
         <input type="hidden" name="name" value="{{ s.series_title }}">
         <input type="hidden" name="asin" value="{{ s.series_asin }}">
         <button class="btn btn-primary btn-small" type="submit">Watch series</button>
-      </form>
+      {{ csrf_field() }}</form>
     </div>
     {% endfor %}
   </div>

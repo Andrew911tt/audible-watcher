@@ -17,7 +17,7 @@
           {% if asin %}<input type="hidden" name="asin" value="{{ asin }}">{% endif %}
           <button class="btn btn-small" type="submit"
                   title="Add {{ group_name }} to your watch list">+ Watch {{ wtype }}</button>
-        </form>
+        {{ csrf_field() }}</form>
       {% endif %}
     {% endif %}
   </summary>
@@ -70,13 +70,13 @@
         <form method="post"
               action="{{ url_for('book_seen', asin=b.asin, watch_id=b.watch_id) }}">
           <button class="btn btn-small" type="submit">Mark seen</button>
-        </form>
+        {{ csrf_field() }}</form>
         {% endif %}
         <form method="post"
               action="{{ url_for('book_hide', asin=b.asin, watch_id=b.watch_id) }}">
           <button class="btn btn-small btn-danger" type="submit"
                   title="Hide this entry from the library">Hide</button>
-        </form>
+        {{ csrf_field() }}</form>
       </div>
       {% endif %}
     </div>

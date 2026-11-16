@@ -14,11 +14,11 @@
   <div class="btn-row">
     <form method="post" action="{{ url_for('account_sync') }}" style="display:inline">
       <button class="btn btn-primary" type="submit">Sync library now</button>
-    </form>
+    {{ csrf_field() }}</form>
     <form method="post" action="{{ url_for('account_disconnect') }}" style="display:inline"
           onsubmit="return confirm('Disconnect your Audible account and remove owned-library data?')">
       <button class="btn btn-danger" type="submit">Disconnect</button>
-    </form>
+    {{ csrf_field() }}</form>
   </div>
   <p class="muted small">Your login happened on amazon.com — this app only
     holds device tokens (in <code>audible_auth.json</code>), never your
@@ -40,7 +40,7 @@
         <input type="text" name="response_url"
                placeholder="https://www.amazon.com/ap/maplanding?...">
         <button class="btn btn-primary" type="submit">Complete connection</button>
-      </form>
+      {{ csrf_field() }}</form>
     </li>
   </ol>
 
@@ -51,7 +51,7 @@
     the same way the official Audible app registers a device.</p>
   <form method="post" action="{{ url_for('account_start') }}" class="btn-row">
     <button class="btn btn-primary" type="submit">Connect Audible account</button>
-  </form>
+  {{ csrf_field() }}</form>
 {% endif %}
 
 {% endblock %}

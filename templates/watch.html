@@ -13,7 +13,7 @@
       <button class="btn" type="submit"
               title="Hide duplicate listings of the same book (keeps the one with a real release date)">
         🧹 Clean up duplicates</button>
-    </form>
+    {{ csrf_field() }}</form>
     <a class="btn" href="{{ url_for('dashboard') }}">← Back</a>
   </div>
 </div>
@@ -60,7 +60,7 @@
       <form method="post"
             action="{{ url_for('book_unhide', asin=b.asin, watch_id=b.watch_id) }}">
         <button class="btn btn-small" type="submit">Unhide</button>
-      </form>
+      {{ csrf_field() }}</form>
     </li>
     {% endfor %}
   </ul>

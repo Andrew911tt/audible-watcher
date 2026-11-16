@@ -73,10 +73,10 @@
   <div class="btn-row">
     <button class="btn btn-primary" type="submit">Save settings</button>
   </div>
-</form>
+{{ csrf_field() }}</form>
 
 <form method="post" action="{{ url_for('test_email') }}" class="btn-row">
   <button class="btn" type="submit">Send test email</button>
-</form>
+{{ csrf_field() }}</form>
 
 {% endblock %}

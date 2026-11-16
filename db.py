@@ -9,6 +9,7 @@ Audible account's library.
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
@@ -77,6 +78,12 @@ CREATE TABLE IF NOT EXISTS owned_books (
     url             TEXT,
     purchase_date   TEXT,
     preordered      INTEGER NOT NULL DEFAULT 0
+);
+
+-- internal secrets, kept apart from user-facing settings
+CREATE TABLE IF NOT EXISTS app_secrets (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS check_log (
@@ -197,6 +204,15 @@ def save_settings(values: dict):
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                 (k, str(v)),
             )
+
+
+def secret_key() -> str:
+    """The Flask session key: random, created once per install."""
+    with conn() as c:
+        c.execute("INSERT OR IGNORE INTO app_secrets (key, value) "
+                  "VALUES ('flask_secret_key', ?)", (secrets.token_hex(32),))
+        return c.execute("SELECT value FROM app_secrets "
+                         "WHERE key = 'flask_secret_key'").fetchone()[0]
 
 
 # ---------- watches ----------
@@ -506,11 +522,15 @@ def set_book_hidden(asin: str, watch_id: int, hidden: bool):
 
 def hide_duplicate_books(watch_id: int) -> int:
     """Hide duplicate catalog entries for a watch, keeping one book per
-    series sequence (or per title when there is no sequence). An entry with
-    a real release date beats a TBA placeholder; then earlier releases win."""
+    (series, sequence) — or per title when there is no sequence. An author
+    watch spans several series, so book 1 of one series is not a duplicate
+    of book 1 of another. An entry with a real release date beats a TBA
+    placeholder; then earlier releases win."""
     groups: dict = {}
     for b in books_for_watch(watch_id):
-        key = (("seq", b["series_sequence"]) if b["series_sequence"]
+        key = (("seq", (b["series_title"] or "").strip().lower(),
+                b["series_sequence"].strip())
+               if b["series_sequence"]
                else ("title", (b["title"] or "").strip().lower()))
         groups.setdefault(key, []).append(b)
     hidden = 0
