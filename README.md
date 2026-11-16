@@ -4,6 +4,8 @@ A small self-hosted app that watches Audible for **new releases from your
 favorite authors and series** and **emails you** when something new shows up
 (including pre-orders, as soon as they're listed).
 
+![The Pre-orders tab: upcoming audiobooks from followed series and authors, each with cover, release date and a PRE-ORDER or PRE-ORDERED badge](docs/screenshots/preorders.png)
+
 It uses Audible's public catalog API — no Audible login required, no
 credentials, no scraping of web pages. Everything runs on your own computer.
 
@@ -33,6 +35,9 @@ Content and Devices".
 
 - **Dashboard** showing everything you watch, with a "new books" section,
   latest release dates, pre-orders and a check history log.
+
+  ![The dashboard's Authors tab: each watched author with their number of titles, upcoming pre-orders and latest release date](docs/screenshots/dashboard.png)
+
 - **Watch authors or series** — search Audible from the app and add them.
   Watching a series also watches its author.
 - **Daily automatic check** (time configurable) plus a "Check Audible now"
@@ -54,6 +59,9 @@ Content and Devices".
   author or series. Books you own in another region's edition count as
   owned. The library re-syncs about once a day with the daily check, so new
   purchases show up on their own.
+
+  ![A series page (Murderbot Diaries) in series order: owned books carry an OWNED badge, and dramatized adaptations are listed next to the original editions](docs/screenshots/series-page.png)
+
 - **Series links** — every series name links to that series' page in the
   app (or a search, if you don't watch it yet), and series pages link to
   the series in the Audible store.
