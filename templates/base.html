@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Audible Watcher{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  {% block head %}{% endblock %}
 </head>
 <body>
 <header class="topbar">
@@ -14,6 +15,11 @@
     <a href="{{ url_for('search') }}">Add favorites</a>
     <a href="{{ url_for('account_page') }}">Account</a>
     <a href="{{ url_for('settings_page') }}">Settings</a>
+    {% if password_enabled and request.endpoint != 'login' %}
+    <form method="post" action="{{ url_for('logout') }}" class="nav-form">
+      <button class="nav-link" type="submit">Sign out</button>
+    {{ csrf_field() }}</form>
+    {% endif %}
   </nav>
 </header>
 
@@ -32,6 +38,16 @@
 </main>
 
 <script>
+// forms with data-confirm ask first. The message is read from the attribute
+// (never pasted into inline JS), so names with quotes can't break it.
+document.addEventListener('submit', function (e) {
+  const msg = e.target.dataset && e.target.dataset.confirm;
+  if (msg && !window.confirm(msg)) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+}, true);
+
 // forms marked js-watch submit in the background so the page never reloads
 document.addEventListener('submit', async function (e) {
   const form = e.target.closest('form.js-watch');

@@ -24,6 +24,23 @@ AUTH_FILE = os.path.join(DATA_DIR, "audible_auth.json")
 
 # our marketplace codes happen to match the audible package's locales
 LOCALES = {"us", "uk", "ca", "au", "de", "fr", "in", "it", "es", "jp"}
+ORDER_PAGES = 20  # 50 orders a page, newest first; pre-orders are recent
+
+
+def _save_auth(auth):
+    """Write the device tokens, readable only by this user from the moment
+    the file exists, and atomically: written to a private temp file, then
+    swapped in, so a crash mid-write can't leave a half-written token file.
+    (Not encrypted: the key would have to sit right next to the file.)"""
+    tmp = AUTH_FILE + ".tmp"
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    os.close(fd)
+    try:
+        auth.to_file(tmp, encryption=False, set_default=False)
+        os.replace(tmp, AUTH_FILE)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
 
 
 class _PendingLogin:
@@ -71,7 +88,7 @@ def start_login(marketplace: str) -> str:
         try:
             auth = audible.Authenticator.from_login_external(
                 locale=locale, login_url_callback=url_callback)
-            auth.to_file(AUTH_FILE, encryption=False)
+            _save_auth(auth)
         except Exception as e:  # noqa: BLE001 - surfaced via p.error
             log.exception("Audible login failed")
             p.error = str(e)
@@ -101,14 +118,25 @@ def complete_login(response_url: str, timeout: int = 90):
         raise RuntimeError(p.error)
 
 
-def disconnect():
-    """Forget the device tokens and owned-library data. (The device can also
-    be deregistered on Amazon's 'Manage Your Content and Devices' page.)"""
+def disconnect() -> bool:
+    """Deregister this device with Amazon, then forget the device tokens and
+    owned-library data. Returns whether Amazon confirmed the deregistration;
+    if not (offline, tokens already revoked), the local data is removed
+    anyway and the user can remove the device on Amazon's "Manage Your
+    Content and Devices" page."""
     global _pending
     _pending = None
+    deregistered = False
     if os.path.exists(AUTH_FILE):
+        try:
+            audible.Authenticator.from_file(AUTH_FILE).deregister_device()
+            deregistered = True
+        except Exception:  # noqa: BLE001 - never block a disconnect
+            log.warning("Could not deregister the device with Amazon",
+                        exc_info=True)
         os.remove(AUTH_FILE)
     db.replace_owned([])
+    return deregistered
 
 
 def account_name() -> str | None:
@@ -127,7 +155,7 @@ def _preordered_asins(client) -> list[str]:
     pre-orders in the orders feed until release day — they only move into
     the library once they're delivered."""
     asins, page = [], 1
-    while page <= 5:
+    while page <= ORDER_PAGES:
         data = client.get("1.0/orders", num_results=50, page=page)
         orders = data.get("orders") or []
         if not orders:
@@ -151,24 +179,28 @@ def sync_library() -> int:
     auth = audible.Authenticator.from_file(AUTH_FILE)
     marketplace = db.get_settings().get("marketplace", "us")
     items = []
-    with audible.Client(auth=auth) as client:
-        page = 1
-        while True:
-            data = client.get(
-                "1.0/library", num_results=500, page=page,
-                response_groups="product_desc,product_attrs,contributors,"
-                                "series,media")
-            batch = data.get("items") or []
-            items.extend(batch)
-            if len(batch) < 500:
-                break
-            page += 1
-        try:
-            preordered = _preordered_asins(client)
-        except Exception:  # noqa: BLE001 - orders feed is best-effort
-            log.exception("Could not read the orders feed for pre-orders")
-            preordered = []
-    auth.to_file(AUTH_FILE, encryption=False)  # persist refreshed tokens
+    try:
+        with audible.Client(auth=auth) as client:
+            page = 1
+            while True:
+                data = client.get(
+                    "1.0/library", num_results=500, page=page,
+                    response_groups="product_desc,product_attrs,"
+                                    "contributors,series,media")
+                batch = data.get("items") or []
+                items.extend(batch)
+                if len(batch) < 500:
+                    break
+                page += 1
+            try:
+                preordered = _preordered_asins(client)
+            except Exception:  # noqa: BLE001 - orders feed is best-effort
+                log.exception("Could not read the orders feed for pre-orders")
+                preordered = []
+    finally:
+        # the client may have refreshed the access token even if the sync
+        # failed part-way; keep it either way
+        _save_auth(auth)
 
     rows = []
     for i in items:

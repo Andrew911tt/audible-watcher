@@ -73,7 +73,13 @@ PUBLISHED = {"The Third Book (NEW)": "2025-05-01"}
 def fake_published_date(title, author=None):
     return PUBLISHED.get(title), True
 
+REAL = {}  # the unpatched functions, for tests of the HTTP layer itself
+
+
 def install():
+    REAL.update(_get=audible_api._get,
+                _series_child_asins=audible_api._series_child_asins,
+                published_date=bookinfo.published_date)
     audible_api._get = fake_get
     audible_api._series_child_asins = fake_series_child_asins
     bookinfo.published_date = fake_published_date

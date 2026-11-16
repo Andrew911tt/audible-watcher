@@ -7,7 +7,7 @@
 {% if connected %}
   <div class="notice">✅ Connected{% if name %} as <strong>{{ name }}</strong>{% endif %}
     — {{ owned_count }} owned title(s)
-    {% if synced_at %}<span class="muted small">(last synced {{ synced_at }})</span>{% endif %}
+    {% if synced_at %}<span class="muted small">(last synced {{ synced_at|localtime }})</span>{% endif %}
   </div>
   <p class="muted">Books you own get an <span class="badge badge-owned">OWNED</span>
     badge on watch pages. Re-sync after buying new books.</p>
@@ -16,7 +16,7 @@
       <button class="btn btn-primary" type="submit">Sync library now</button>
     {{ csrf_field() }}</form>
     <form method="post" action="{{ url_for('account_disconnect') }}" style="display:inline"
-          onsubmit="return confirm('Disconnect your Audible account and remove owned-library data?')">
+          data-confirm="Disconnect your Audible account and remove owned-library data?">
       <button class="btn btn-danger" type="submit">Disconnect</button>
     {{ csrf_field() }}</form>
   </div>

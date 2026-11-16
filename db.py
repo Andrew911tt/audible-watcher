@@ -8,6 +8,7 @@ Audible account's library.
 """
 from __future__ import annotations
 
+import json
 import os
 import secrets
 import sqlite3
@@ -33,6 +34,7 @@ CREATE TABLE IF NOT EXISTS watches (
     created_at      TEXT NOT NULL,
     last_checked_at TEXT,
     last_error      TEXT,
+    baselined_at    TEXT,  -- first successful fetch; NULL = not done yet
     UNIQUE (type, name)
 );
 
@@ -44,6 +46,7 @@ CREATE TABLE IF NOT EXISTS books (
     narrators       TEXT,
     series_title    TEXT,
     series_sequence TEXT,
+    all_series      TEXT,     -- JSON list of every series the book is in
     release_date    TEXT,
     runtime_minutes INTEGER,
     language        TEXT,
@@ -108,6 +111,7 @@ DEFAULT_SETTINGS = {
     "email_to": "",
     "email_enabled": "0",
     "language": "",              # '' = any language
+    "lookup_publish_dates": "1",  # ask Google Books / Open Library
 }
 
 
@@ -168,6 +172,19 @@ def init_db():
         book_cols = {r["name"] for r in c.execute("PRAGMA table_info(books)")}
         if "available" not in book_cols:
             c.execute("ALTER TABLE books ADD COLUMN available INTEGER")
+        if "all_series" not in book_cols:
+            c.execute("ALTER TABLE books ADD COLUMN all_series TEXT")
+        watch_cols = {r["name"]
+                      for r in c.execute("PRAGMA table_info(watches)")}
+        if "baselined_at" not in watch_cols:
+            c.execute("ALTER TABLE watches ADD COLUMN baselined_at TEXT")
+            # watches from older versions that already have books were
+            # baselined back then
+            c.execute("""
+                UPDATE watches SET baselined_at =
+                    COALESCE(last_checked_at, created_at)
+                WHERE EXISTS (SELECT 1 FROM watch_books wb
+                              WHERE wb.watch_id = watches.id)""")
         owned_cols = {r["name"]
                       for r in c.execute("PRAGMA table_info(owned_books)")}
         for col, decl in [("authors", "TEXT"), ("narrators", "TEXT"),
@@ -261,6 +278,25 @@ def get_watch(watch_id: int) -> dict | None:
     return dict(r) if r else None
 
 
+def mark_baselined(watch_id: int):
+    with conn() as c:
+        c.execute("UPDATE watches SET baselined_at = ? WHERE id = ?",
+                  (now_iso(), watch_id))
+
+
+def reset_for_marketplace_change():
+    """Another marketplace lists many books under different ASINs, so every
+    watch must be re-recorded as a baseline (nothing flagged new), and the
+    "sold here?" verdicts start over. Editions hidden only because they
+    weren't sold in the old marketplace come back (still not new)."""
+    with conn() as c:
+        c.execute("UPDATE watches SET baselined_at = NULL")
+        c.execute("""
+            UPDATE watch_books SET hidden = 0, is_new = 0, notified = 1
+            WHERE asin IN (SELECT asin FROM books WHERE available = 0)""")
+        c.execute("UPDATE books SET available = NULL")
+
+
 def mark_watch_checked(watch_id: int, error: str | None = None):
     with conn() as c:
         c.execute("UPDATE watches SET last_checked_at = ?, last_error = ? WHERE id = ?",
@@ -272,9 +308,9 @@ def mark_watch_checked(watch_id: int, error: str | None = None):
 _BOOK_UPSERT = """
     INSERT INTO books
     (asin, title, subtitle, authors, narrators, series_title,
-     series_sequence, release_date, runtime_minutes, language, image_url,
-     url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     series_sequence, all_series, release_date, runtime_minutes, language,
+     image_url, url)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(asin) DO UPDATE SET
         title = excluded.title,
         subtitle = excluded.subtitle,
@@ -282,6 +318,7 @@ _BOOK_UPSERT = """
         narrators = excluded.narrators,
         series_title = excluded.series_title,
         series_sequence = excluded.series_sequence,
+        all_series = COALESCE(excluded.all_series, books.all_series),
         release_date = excluded.release_date,
         runtime_minutes = excluded.runtime_minutes,
         language = excluded.language,
@@ -290,6 +327,36 @@ _BOOK_UPSERT = """
 """
 # published_date is deliberately not refreshed here — it comes from the
 # metadata enrichment, not the Audible catalog.
+
+
+# hiding also clears the NEW flag and counts as notified, so a hidden book
+# never shows up as new or in an email
+_HIDE = "UPDATE watch_books SET hidden = 1, is_new = 0, notified = 1 WHERE "
+
+
+def _watched_series(row: dict) -> dict:
+    """On a series watch, show the book's place in *that* series. A book can
+    belong to several series (e.g. a sub-series and its universe); the
+    stored series_title/sequence is just the first one Audible lists."""
+    if row.get("watch_type") != "series" or not row.get("all_series"):
+        return row
+    try:
+        series = json.loads(row["all_series"])
+    except ValueError:
+        return row
+    asin = row.get("watch_asin")
+    name = (row.get("watch_name") or "").strip().lower()
+    for s in series:
+        if ((asin and s.get("asin") == asin)
+                or (s.get("title") or "").strip().lower() == name):
+            row["series_title"] = s.get("title") or row.get("series_title")
+            row["series_sequence"] = s.get("sequence")
+            break
+    return row
+
+
+def _book_rows(rows) -> list[dict]:
+    return [_watched_series(dict(r)) for r in rows]
 
 
 def known_asins(watch_id: int) -> set[str]:
@@ -314,7 +381,9 @@ def upsert_books(watch_id: int, books: list[dict], as_new: bool,
             c.execute(_BOOK_UPSERT, (
                 b["asin"], b.get("title"), b.get("subtitle"),
                 b.get("authors"), b.get("narrators"), b.get("series_title"),
-                b.get("series_sequence"), b.get("release_date"),
+                b.get("series_sequence"),
+                json.dumps(b["all_series"]) if b.get("all_series") else None,
+                b.get("release_date"),
                 b.get("runtime_minutes"), b.get("language"),
                 b.get("image_url"), b.get("url"),
             ))
@@ -339,23 +408,23 @@ def hide_books(watch_id: int, asins: list[str]):
     """Hide the given catalog entries (e.g. wrong-language editions that were
     imported before a language preference was set)."""
     with conn() as c:
-        c.executemany(
-            "UPDATE watch_books SET hidden = 1, is_new = 0, notified = 1 "
-            "WHERE asin = ? AND watch_id = ?",
-            [(a, watch_id) for a in asins])
+        c.executemany(_HIDE + "asin = ? AND watch_id = ?",
+                      [(a, watch_id) for a in asins])
 
 
 def books_for_watch(watch_id: int, include_hidden: bool = False) -> list[dict]:
     q = ("SELECT b.*, wb.watch_id, wb.discovered_at, wb.is_new, "
-         "wb.notified, wb.hidden "
+         "wb.notified, wb.hidden, w.name AS watch_name, "
+         "w.type AS watch_type, w.asin AS watch_asin "
          "FROM books b JOIN watch_books wb ON wb.asin = b.asin "
+         "JOIN watches w ON w.id = wb.watch_id "
          "WHERE wb.watch_id = ? ")
     if not include_hidden:
         q += "AND wb.hidden = 0 "
     q += "ORDER BY (b.release_date IS NULL), b.release_date DESC"
     with conn() as c:
         rows = c.execute(q, (watch_id,)).fetchall()
-    return [dict(r) for r in rows]
+    return _book_rows(rows)
 
 
 def dedupe_by_asin(rows) -> list[dict]:
@@ -364,7 +433,7 @@ def dedupe_by_asin(rows) -> list[dict]:
     attribution."""
     best: dict[str, dict] = {}
     for r in rows:
-        r = dict(r)
+        r = _watched_series(dict(r))
         cur = best.get(r["asin"])
         if cur is None or (r["watch_type"] == "series"
                            and cur["watch_type"] != "series"):
@@ -374,7 +443,8 @@ def dedupe_by_asin(rows) -> list[dict]:
 
 def new_books(watch_id: int | None = None) -> list[dict]:
     q = ("SELECT b.*, wb.watch_id, wb.is_new, wb.hidden, "
-         "w.name AS watch_name, w.type AS watch_type "
+         "w.name AS watch_name, w.type AS watch_type, "
+         "w.asin AS watch_asin "
          "FROM books b "
          "JOIN watch_books wb ON wb.asin = b.asin "
          "JOIN watches w ON w.id = wb.watch_id "
@@ -388,7 +458,7 @@ def new_books(watch_id: int | None = None) -> list[dict]:
         rows = c.execute(q, args).fetchall()
     if watch_id is None:  # dashboard: show each book once
         return dedupe_by_asin(rows)
-    return [dict(r) for r in rows]
+    return _book_rows(rows)
 
 
 def books_missing_published(limit: int = 30) -> list[dict]:
@@ -446,8 +516,7 @@ def hide_asin_everywhere(asin: str):
     """Hide a book on every watch (e.g. an edition not sold in this
     marketplace). Runs once per book — a manual unhide is respected."""
     with conn() as c:
-        c.execute("UPDATE watch_books SET hidden = 1, is_new = 0, "
-                  "notified = 1 WHERE asin = ?", (asin,))
+        c.execute(_HIDE + "asin = ?", (asin,))
 
 
 def series_sizes() -> dict[str, int]:
@@ -470,7 +539,8 @@ def preorder_books() -> list[dict]:
     with conn() as c:
         rows = c.execute("""
             SELECT b.*, wb.watch_id, wb.is_new,
-                   w.name AS watch_name, w.type AS watch_type
+                   w.name AS watch_name, w.type AS watch_type,
+                   w.asin AS watch_asin
             FROM books b
             JOIN watch_books wb ON wb.asin = b.asin
             JOIN watches w ON w.id = wb.watch_id
@@ -484,14 +554,15 @@ def unnotified_books() -> list[dict]:
     with conn() as c:
         rows = c.execute("""
             SELECT b.*, wb.watch_id, wb.is_new,
-                   w.name AS watch_name, w.type AS watch_type
+                   w.name AS watch_name, w.type AS watch_type,
+                   w.asin AS watch_asin
             FROM books b
             JOIN watch_books wb ON wb.asin = b.asin
             JOIN watches w ON w.id = wb.watch_id
             WHERE wb.notified = 0 AND wb.hidden = 0
             ORDER BY (b.release_date IS NULL), b.release_date DESC
         """).fetchall()
-    return [dict(r) for r in rows]
+    return _book_rows(rows)
 
 
 def mark_notified(pairs: list[tuple[str, int]]):
@@ -500,7 +571,7 @@ def mark_notified(pairs: list[tuple[str, int]]):
                       "WHERE asin = ? AND watch_id = ?", pairs)
 
 
-def mark_seen(asin: str, watch_id: int):
+def mark_seen(asin: str):
     """Seen is about the book, so clear it on every watch it matches —
     otherwise its other watch's copy would pop up on the dashboard."""
     with conn() as c:
@@ -512,9 +583,7 @@ def set_book_hidden(asin: str, watch_id: int, hidden: bool):
     next Audible check doesn't re-import it and flag it as a new release."""
     with conn() as c:
         if hidden:
-            c.execute("UPDATE watch_books SET hidden = 1, is_new = 0, "
-                      "notified = 1 WHERE asin = ? AND watch_id = ?",
-                      (asin, watch_id))
+            c.execute(_HIDE + "asin = ? AND watch_id = ?", (asin, watch_id))
         else:
             c.execute("UPDATE watch_books SET hidden = 0 "
                       "WHERE asin = ? AND watch_id = ?", (asin, watch_id))
@@ -540,8 +609,7 @@ def hide_duplicate_books(watch_id: int) -> int:
                                     b["release_date"] or "",
                                     b["discovered_at"]))
             for b in grp[1:]:
-                c.execute("UPDATE watch_books SET hidden = 1, is_new = 0, "
-                          "notified = 1 WHERE asin = ? AND watch_id = ?",
+                c.execute(_HIDE + "asin = ? AND watch_id = ?",
                           (b["asin"], watch_id))
                 hidden += 1
     return hidden

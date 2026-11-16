@@ -17,10 +17,10 @@
     <a class="btn" href="{{ url_for('dashboard') }}">← Back</a>
   </div>
 </div>
-<p class="muted small">Last checked: {{ watch.last_checked_at or 'never' }}
+<p class="muted small">Last checked: {{ watch.last_checked_at|localtime }}
   {% if watch.last_error %}<span class="err"> — last error: {{ watch.last_error }}</span>{% endif %}
-  {% if owned_asins %}
-    {% set owned_here = books|selectattr('asin', 'in', owned_asins)|list|length %}
+  {% if has_owned() %}
+    {% set owned_here = books|select('owned')|list|length %}
     — you own {{ owned_here }} of {{ books|length }}
   {% endif %}
 </p>

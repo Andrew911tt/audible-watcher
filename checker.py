@@ -1,13 +1,16 @@
 """Release checking and email notification logic."""
 from __future__ import annotations
 
+import html
 import logging
 import smtplib
+import socket
 import ssl
 import threading
 import time
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
 
 import audible_api
 import bookinfo
@@ -23,16 +26,21 @@ def background_enrichment_async():
     """Run the metadata passes (marketplace availability, publish dates) in
     the background so adding a watch or running a check never blocks on
     them. Skips silently if a batch is already running."""
-    def run():
-        if not _enrich_lock.acquire(blocking=False):
-            return
-        try:
-            verify_market_availability()
-            enrich_published_dates()
-        finally:
-            _enrich_lock.release()
+    threading.Thread(target=run_enrichment, daemon=True).start()
 
-    threading.Thread(target=run, daemon=True).start()
+
+def run_enrichment():
+    """One batch of metadata passes, unless one is already running."""
+    if not _enrich_lock.acquire(blocking=False):
+        return
+    try:
+        verify_market_availability()
+        # publish dates come from Google Books / Open Library: only if the
+        # user hasn't switched those lookups off
+        if db.get_settings().get("lookup_publish_dates", "1") == "1":
+            enrich_published_dates()
+    finally:
+        _enrich_lock.release()
 
 
 def verify_market_availability(limit: int = 50):
@@ -143,34 +151,93 @@ def _sold_here(pending: list[dict], marketplace: str) -> list[dict]:
     return [b for b in pending if verdict[b["asin"]]]
 
 
+def _empty_note(watch: dict, books: list) -> str | None:
+    """A warning for the watch list when an author watch finds nothing —
+    usually a name that doesn't exactly match how Audible credits them."""
+    if watch["type"] == "author" and not books:
+        return ("Audible lists no titles credited to exactly this name. "
+                "Check the spelling, or re-add the author from a search.")
+    return None
+
+
+MAX_UNREACHABLE = 3  # watches in a row Audible can't be reached for
+
+
+def _update_watch(w: dict, settings: dict) -> list[dict]:
+    """Fetch one watch and store its books; returns the newly found ones.
+
+    Until a watch's first fetch has succeeded (it failed when the watch was
+    added, or the marketplace changed), what's on Audible is recorded as its
+    baseline — already seen, never emailed — instead of all of it being
+    flagged as new releases.
+    """
+    books = audible_api.fetch_watch_books(
+        w["type"], w["name"], w["asin"], settings.get("marketplace", "us"))
+    keep, foreign = _split_by_language(books, settings)
+    _store_foreign(w["id"], foreign)
+    first_fetch = not w.get("baselined_at")
+    fresh = db.upsert_books(w["id"], keep, as_new=not first_fetch)
+    if first_fetch:
+        db.mark_baselined(w["id"])
+    db.mark_watch_checked(w["id"], _empty_note(w, books))
+    return [] if first_fetch else fresh
+
+
 def check_all(trigger: str = "manual") -> dict:
-    """Check every watch for new books, send one digest email if any found."""
+    """Check every watch for new books, send one digest email if any found.
+
+    If Audible can't be reached for several watches in a row, the rest are
+    skipped (each would only time out too) and the result says so with
+    aborted=True, so the caller can retry later.
+    """
     settings = db.get_settings()
     marketplace = settings.get("marketplace", "us")
     total_new = 0
     errors = []
+    unreachable = 0
+    aborted = False
 
-    for w in db.list_watches():
+    watches = db.list_watches()
+    for i, w in enumerate(watches):
         try:
-            books = audible_api.fetch_watch_books(
-                w["type"], w["name"], w["asin"], marketplace)
-            keep, foreign = _split_by_language(books, settings)
-            _store_foreign(w["id"], foreign)
-            fresh = db.upsert_books(w["id"], keep, as_new=True)
+            fresh = _update_watch(w, settings)
+            unreachable = 0
             total_new += len(fresh)
-            db.mark_watch_checked(w["id"], None)
             if fresh:
                 log.info("Watch %r: %d new book(s)", w["name"], len(fresh))
         except Exception as e:  # noqa: BLE001 - keep checking other watches
+            if db.get_watch(w["id"]) is None:
+                log.info("Watch %r was removed during the check", w["name"])
+                continue  # deleted while we were fetching: not an error
             log.exception("Check failed for watch %r", w["name"])
             errors.append(f"{w['name']}: {e}")
             db.mark_watch_checked(w["id"], str(e))
+            if isinstance(e, audible_api.AudibleUnavailable):
+                unreachable += 1
+                if unreachable >= MAX_UNREACHABLE and i + 1 < len(watches):
+                    skipped = len(watches) - i - 1
+                    errors.append(
+                        f"Audible is unreachable — skipped the other "
+                        f"{skipped} watch(es); will try again later")
+                    aborted = True
+                    break
+            else:
+                unreachable = 0
 
     background_enrichment_async()
 
     email_sent = False
     pending = db.unnotified_books()
-    if pending and settings.get("email_enabled") == "1":
+    if pending and settings.get("email_enabled") != "1":
+        # Email is off: these books are on the dashboard already. Don't save
+        # them up for one enormous email the day email gets switched on.
+        db.mark_notified([(b["asin"], b["watch_id"]) for b in pending])
+        pending = []
+    seen = [b for b in pending if not b["is_new"]]
+    if seen:  # marked seen before an email went out (e.g. SMTP was failing)
+        db.mark_notified([(b["asin"], b["watch_id"]) for b in seen])
+        pending = [b for b in pending if b["is_new"]]
+    if pending:
         ready = _sold_here(pending, marketplace)
         if ready:
             try:
@@ -179,10 +246,11 @@ def check_all(trigger: str = "manual") -> dict:
                 email_sent = True
             except Exception as e:  # noqa: BLE001
                 log.exception("Email send failed")
-                errors.append(f"email: {e}")
+                errors.append(f"email: {explain_smtp_error(e)}")
 
     db.log_check(trigger, total_new, "; ".join(errors) or None, email_sent)
-    return {"new_books": total_new, "errors": errors, "email_sent": email_sent}
+    return {"new_books": total_new, "errors": errors, "email_sent": email_sent,
+            "aborted": aborted}
 
 
 def baseline_watch(watch_id: int) -> int:
@@ -196,7 +264,8 @@ def baseline_watch(watch_id: int) -> int:
     keep, foreign = _split_by_language(books, settings)
     _store_foreign(watch_id, foreign)
     inserted = db.upsert_books(watch_id, keep, as_new=False)
-    db.mark_watch_checked(watch_id, None)
+    db.mark_baselined(watch_id)
+    db.mark_watch_checked(watch_id, _empty_note(w, books))
     background_enrichment_async()
     return len(inserted)
 
@@ -204,21 +273,27 @@ def baseline_watch(watch_id: int) -> int:
 # ---------- email ----------
 
 def _book_row_html(b: dict) -> str:
-    seq = f" (Book {b['series_sequence']})" if b.get("series_sequence") else ""
-    series = f"<br><em>{b['series_title']}{seq}</em>" if b.get("series_title") else ""
-    date = b.get("release_date") or "TBA"
-    img = (f'<img src="{b["image_url"]}" width="80" '
-           'style="border-radius:6px;vertical-align:top">' if b.get("image_url") else "")
+    # every value is escaped: titles like "Q&A" or "<Untitled>" must not
+    # break the email's HTML
+    e = html.escape
+    seq = (f" (Book {e(str(b['series_sequence']))})"
+           if b.get("series_sequence") else "")
+    series = (f"<br><em>{e(b['series_title'])}{seq}</em>"
+              if b.get("series_title") else "")
+    date = e(b.get("release_date") or "TBA")
+    img = (f'<img src="{e(b["image_url"])}" width="80" alt="" '
+           'style="border-radius:6px;vertical-align:top">'
+           if b.get("image_url") else "")
     return f"""
     <tr>
       <td style="padding:10px 12px 10px 0">{img}</td>
       <td style="padding:10px 0">
-        <a href="{b['url']}" style="font-size:16px;font-weight:bold;
-           color:#f29d38;text-decoration:none">{b['title']}</a><br>
-        by {b.get('authors') or 'Unknown'}{series}<br>
+        <a href="{e(b['url'] or '')}" style="font-size:16px;font-weight:bold;
+           color:#f29d38;text-decoration:none">{e(b['title'] or '')}</a><br>
+        by {e(b.get('authors') or 'Unknown')}{series}<br>
         <span style="color:#666">Release date: {date}</span><br>
-        <span style="color:#999;font-size:12px">Watched: {b['watch_name']}
-        ({b['watch_type']})</span>
+        <span style="color:#999;font-size:12px">Watched:
+        {e(b['watch_name'])} ({e(b['watch_type'])})</span>
       </td>
     </tr>"""
 
@@ -228,7 +303,7 @@ def build_email(books: list[dict]) -> tuple[str, str, str]:
     subject = (f"Audible Watcher: {n} new book{'s' if n != 1 else ''} "
                "from your favorites")
     rows = "\n".join(_book_row_html(b) for b in books)
-    html = f"""<html><body style="font-family:Arial,Helvetica,sans-serif;
+    body = f"""<html><body style="font-family:Arial,Helvetica,sans-serif;
       color:#222;max-width:640px">
       <h2 style="color:#f29d38">🎧 New on Audible</h2>
       <p>{n} new title{'s' if n != 1 else ''} matching your watched authors
@@ -242,7 +317,7 @@ def build_email(books: list[dict]) -> tuple[str, str, str]:
         text_lines.append(f"- {b['title']} by {b.get('authors') or 'Unknown'}"
                           f" — releases {b.get('release_date') or 'TBA'}")
         text_lines.append(f"  {b['url']}")
-    return subject, html, "\n".join(text_lines)
+    return subject, body, "\n".join(text_lines)
 
 
 def send_email(subject: str, html: str, text: str, settings: dict):
@@ -261,6 +336,9 @@ def send_email(subject: str, html: str, text: str, settings: dict):
     msg["Subject"] = subject
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
+    msg["Date"] = formatdate(localtime=True)
+    msg["Message-ID"] = make_msgid(domain=(sender.rpartition("@")[2]
+                                           or None))
     msg.attach(MIMEText(text, "plain"))
     msg.attach(MIMEText(html, "html"))
 
@@ -274,6 +352,37 @@ def send_email(subject: str, html: str, text: str, settings: dict):
                               context=ssl.create_default_context()) as s:
             s.login(user, password)
             s.sendmail(sender, recipients, msg.as_string())
+
+
+def explain_smtp_error(e: Exception) -> str:
+    """The error plus a plain-language hint about what to fix in Settings."""
+    detail = str(e) or type(e).__name__
+    if isinstance(e, smtplib.SMTPAuthenticationError):
+        hint = ("the mail server rejected the email address or password. "
+                "Use an app password, not your normal password, and the "
+                "full email address as the username")
+    elif isinstance(e, ssl.SSLCertVerificationError):
+        hint = ("the mail server's security certificate couldn't be "
+                "verified. Check the server name is exactly right (for "
+                "Gmail: smtp.gmail.com) and that this computer's date and "
+                "time are correct")
+    elif isinstance(e, ssl.SSLError):
+        hint = ("the port and security setting don't match. Use port 465 "
+                "with SSL, or port 587 with STARTTLS")
+    elif isinstance(e, socket.gaierror):
+        hint = "the SMTP server name wasn't found. Check it for typos"
+    elif isinstance(e, (TimeoutError, socket.timeout)):
+        hint = ("the mail server didn't answer. Check the port and security "
+                "setting, and that this machine can reach the internet")
+    elif isinstance(e, (ConnectionError, smtplib.SMTPConnectError,
+                        smtplib.SMTPServerDisconnected)):
+        hint = ("couldn't connect to the mail server. Check the server name, "
+                "port and security setting")
+    elif isinstance(e, smtplib.SMTPRecipientsRefused):
+        hint = "the “Send notifications to” address was refused. Check it"
+    else:
+        return detail
+    return f"{hint} ({detail})"
 
 
 def send_new_release_email(books: list[dict], settings: dict):

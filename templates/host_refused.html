@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Address not recognised — Audible Watcher</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<main class="host-refused">
+  <h1>🎧 Address not recognised</h1>
+  <p>Audible Watcher doesn't know the address <code>{{ name }}</code>, so
+    it refused this page. This protects it from websites that try to
+    reach it through your browser.</p>
+  <p><strong>Is <code>{{ name }}</code> your own server's name?</strong>
+    Then allow it by adding it to the <code>AW_ALLOWED_HOSTS</code> setting
+    and restarting Audible Watcher. If you already allow other names,
+    separate them with commas.</p>
+
+  <h2>Docker Compose</h2>
+  <p>In <code>docker-compose.yml</code>, under <code>environment:</code>,
+    then run <code>docker compose up -d</code>:</p>
+  <pre>      - AW_ALLOWED_HOSTS={{ name }}</pre>
+
+  <h2>Linux service (systemd)</h2>
+  <p>Run <code>sudo systemctl edit audible-watcher</code>, add these lines,
+    save, then <code>sudo systemctl restart audible-watcher</code>:</p>
+  <pre>[Service]
+Environment=AW_ALLOWED_HOSTS={{ name }}</pre>
+
+  <h2>Other installs</h2>
+  <p>See <a href="{{ help_url }}" target="_blank" rel="noopener">“Opening it
+    from other devices”</a> for Windows and running from source.</p>
+
+  <p class="muted small">Or skip all this and open the app by its IP
+    address instead (for example <code>http://192.168.1.20:5055</code>):
+    IP addresses always work.</p>
+</main>
+</body>
+</html>

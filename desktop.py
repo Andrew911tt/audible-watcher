@@ -13,26 +13,55 @@ Needs the extra packages in requirements-desktop.txt (waitress, pystray, Pillow)
 from __future__ import annotations
 
 import logging
+import logging.handlers
 import os
+import json
 import socket
 import sys
 import threading
+import urllib.request
 import webbrowser
 
 from paths import DATA_DIR
 
-# No console in the packaged app, so log to a file in the data folder.
-logging.basicConfig(
-    filename=os.path.join(DATA_DIR, "audible-watcher.log"),
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("desktop")
 
 
-def _already_running(host: str, port: int) -> bool:
+def _setup_logging():
+    """No console in the packaged app, so log to a file in the data folder,
+    rotated so it can't grow forever (about 3 MB at most)."""
+    logging.basicConfig(
+        handlers=[logging.handlers.RotatingFileHandler(
+            os.path.join(DATA_DIR, "audible-watcher.log"),
+            maxBytes=1_000_000, backupCount=2, encoding="utf-8")],
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def _port_status(port: int) -> str:
+    """'free', 'ours' (Audible Watcher already running there) or 'other'
+    (some other program has the port)."""
     with socket.socket() as s:
         s.settimeout(0.5)
-        return s.connect_ex((host, port)) == 0
+        if s.connect_ex(("127.0.0.1", port)) != 0:
+            return "free"
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz",
+                                    timeout=3) as r:
+            if json.load(r).get("app") == "audible-watcher":
+                return "ours"
+    except Exception:  # noqa: BLE001 - anything else means "not us"
+        pass
+    return "other"
+
+
+def _show_error(message: str):
+    """A visible error for the windowless app (Windows message box)."""
+    log.error(message)
+    if sys.platform == "win32":
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(None, message, "Audible Watcher",
+                                         0x10)
 
 
 def _icon_image():
@@ -48,14 +77,22 @@ def _icon_image():
 
 
 def main() -> None:
-    import app as webapp  # imported here so logging is set up first
+    _setup_logging()
+    import app as webapp  # imported after logging is set up
 
     url = f"http://{'localhost' if webapp.HOST in ('127.0.0.1', '0.0.0.0') else webapp.HOST}:{webapp.PORT}"
     background = "--background" in sys.argv
 
-    if _already_running("127.0.0.1", webapp.PORT):
+    status = _port_status(webapp.PORT)
+    if status == "ours":
         log.info("already running; opening %s", url)
         webbrowser.open(url)
+        return
+    if status == "other":
+        _show_error(f"Another program is already using port {webapp.PORT}, "
+                    "so Audible Watcher can't start. Close that program, "
+                    "or set the AW_PORT environment variable to a free "
+                    "port.")
         return
 
     from waitress import serve

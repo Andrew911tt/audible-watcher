@@ -6,16 +6,21 @@ Run:  python app.py          (then open http://localhost:5055)
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import ipaddress
 import logging
 import os
 import secrets
 import threading
-from datetime import date
+import time
+from datetime import date, datetime, timedelta, timezone
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
-from flask import (Flask, flash, redirect, render_template, request, session,
-                   url_for)
+from flask import (Flask, flash, g, redirect, render_template, request,
+                   session, url_for)
 from markupsafe import Markup
 
 import account
@@ -37,13 +42,125 @@ app.secret_key = db.secret_key()
 app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 _check_lock = threading.Lock()
+_check_thread: threading.Thread | None = None  # the latest "Check now" run
 scheduler = BackgroundScheduler()
 
 DEFAULT_CHECK_HOUR = 8
 
 
+# ------------------------------------------------------------------ access
+# 1. Allowed hostnames. A "DNS rebinding" page points its own domain at this
+#    server, so the browser treats it as same-site and the CSRF token can't
+#    help. Its requests still carry the attacker's hostname, so refusing
+#    hostnames that aren't local blocks it. Your own names: AW_ALLOWED_HOSTS.
+# 2. Optional password (AW_PASSWORD) for anyone exposing the app more widely.
+
+LOCAL_HOST_SUFFIXES = (".local", ".lan", ".home", ".home.arpa", ".internal",
+                       ".localhost")
+
+
+README_ACCESS_URL = ("https://github.com/Andrew911tt/audible-watcher"
+                     "#opening-it-from-other-devices")
+
+
+def _extra_hosts() -> list[str]:
+    """Hostnames from AW_ALLOWED_HOSTS, lower-cased, in order."""
+    return [h.strip().lower()
+            for h in os.environ.get("AW_ALLOWED_HOSTS", "").split(",")
+            if h.strip()]
+
+
+def access_info() -> dict:
+    """How access is set up, for the read-only panel on the Settings page.
+    It only shows the settings: they're changed outside the app, so a
+    page can never switch its own protection off."""
+    return {
+        "listen": HOST,
+        "network": HOST not in ("127.0.0.1", "localhost", "::1"),
+        "address": request.host,
+        "extra_hosts": _extra_hosts(),
+        "password": bool(_password()),
+        "help_url": README_ACCESS_URL,
+    }
+
+
+def host_allowed(host: str) -> bool:
+    host = (host or "").strip().lower()
+    if host.startswith("["):              # [::1]:5055
+        host = host[1:host.find("]")] if "]" in host else ""
+    elif host.count(":") == 1:            # name:port
+        host = host.split(":")[0]
+    if not host:
+        return False
+    extra = set(_extra_hosts())
+    if "*" in extra or host in extra:
+        return True
+    try:
+        ipaddress.ip_address(host)        # plain IP address
+        return True
+    except ValueError:
+        pass
+    return "." not in host or host.endswith(LOCAL_HOST_SUFFIXES)
+
+
+@app.before_request
+def check_host():
+    if host_allowed(request.host):
+        return None
+    # Werkzeug blanks hostnames with illegal characters; show a placeholder
+    name = request.host.rsplit(":", 1)[0] or "your-server-name"
+    log.warning("Refused request for unrecognised host %r", request.host)
+    if request.headers.get("X-Requested-With") == "fetch":
+        return {"ok": False,
+                "error": f"Address “{name}” not allowed (AW_ALLOWED_HOSTS)"}, 400
+    # the name comes from the request: the template escapes it
+    return render_template("host_refused.html", name=name,
+                           help_url=README_ACCESS_URL), 400
+
+
+def _password() -> str:
+    return os.environ.get("AW_PASSWORD", "")
+
+
+def _password_tag() -> str:
+    """Stored in the session at sign-in. Changing AW_PASSWORD changes it,
+    which signs everyone out."""
+    return hmac.new(app.secret_key.encode(), _password().encode(),
+                    hashlib.sha256).hexdigest()[:32]
+
+
+def _signed_in() -> bool:
+    return bool(_password()) and secrets.compare_digest(
+        session.get("signed_in", ""), _password_tag())
+
+
+@app.before_request
+def require_sign_in():
+    if not _password() or request.endpoint in ("login", "static",
+                                                "healthz"):
+        return None
+    if _signed_in():
+        return None
+    if request.headers.get("X-Requested-With") == "fetch":
+        return {"ok": False, "error": "Please sign in again."}, 401
+    target = (request.full_path.rstrip("?")
+              if request.method == "GET" else None)
+    return redirect(url_for("login", next=target))
+
+
+def _safe_next(target: str | None) -> str:
+    """Only same-site paths: never '//evil.example' or a full URL."""
+    if (target and target.startswith("/")
+            and not target.startswith(("//", "/\\"))):
+        return target
+    return url_for("dashboard")
+
+
+app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
+
+
 # ------------------------------------------------------------------ CSRF
-# There is no login, so without this any web page the user visits could
+# Without a login (the default), any web page the user visits could
 # make their browser POST here (change settings, send the saved SMTP
 # password to another server via "Send test email", delete watches...).
 # Every state-changing request must carry the token from the user's session.
@@ -70,7 +187,8 @@ def csrf_protect():
     sent = (request.form.get("csrf_token")
             or request.headers.get("X-CSRF-Token") or "")
     expected = session.get("csrf_token") or ""
-    if expected and secrets.compare_digest(sent, expected):
+    # compare as bytes: compare_digest refuses non-ASCII str
+    if expected and secrets.compare_digest(sent.encode(), expected.encode()):
         return None
     log.warning("Rejected POST %s without a valid CSRF token", request.path)
     msg = ("This request didn't come from an Audible Watcher page (or your "
@@ -80,53 +198,136 @@ def csrf_protect():
     return msg, 400, {"Content-Type": "text/plain; charset=utf-8"}
 
 
-@app.context_processor
-def inject_today():
-    # for marking unreleased/pre-order books (release date in the future/TBA)
-    return {"today": date.today().isoformat()}
+# ------------------------------------------------------------ templates
+# Lookups templates need, computed lazily and at most once per request
+# (a page with 100 book cards used to re-query the watch list each render).
+
+def _watches_by_key() -> dict:
+    if "watches_by_key" not in g:
+        g.watches_by_key = {(w["type"], w["name"].strip().lower()): w["id"]
+                            for w in db.list_watches()}
+    return g.watches_by_key
+
+
+def _book_key(title, authors) -> tuple | None:
+    """Edition-independent identity: normalised title + first author. Other
+    regions' editions of a book have their own ASIN but the same key."""
+    title = "".join(ch for ch in (title or "").lower() if ch.isalnum())
+    author = audible_api.norm_name((authors or "").split(",")[0])
+    return (title, author) if title else None
+
+
+def _owned_index() -> tuple[set, set]:
+    if "owned_index" not in g:
+        keys = {_book_key(b["title"], b["authors"])
+                for b in db.owned_books_list()}
+        keys.discard(None)
+        g.owned_index = (db.owned_asins(), keys)
+    return g.owned_index
+
+
+def ownership(book) -> str | None:
+    """'preordered', 'owned' or None for a catalog book.
+
+    An exact ASIN match is yours: pre-ordered if it isn't out yet. A title
+    and author match (another region's edition) only counts once the book
+    is released: an upcoming edition of a book you own is a different
+    product you haven't ordered.
+    """
+    asins, keys = _owned_index()
+    release = book.get("release_date")
+    upcoming = not release or release > date.today().isoformat()
+    if book.get("asin") in asins:
+        return "preordered" if upcoming else "owned"
+    key = _book_key(book.get("title"), book.get("authors"))
+    if not upcoming and key is not None and key in keys:
+        return "owned"
+    return None
+
+
+def is_owned(book) -> bool:
+    return ownership(book) is not None
+
+
+def has_owned() -> bool:
+    return bool(_owned_index()[0])
+
+
+def watch_id_for(wtype, name):
+    """The existing watch's id for (type, name), or None."""
+    return _watches_by_key().get((wtype, (name or "").strip().lower()))
+
+
+def author_url(name):
+    """The author's watch page if watched, else an in-app author search."""
+    name = name.strip()
+    watch_id = watch_id_for("author", name)
+    if watch_id:
+        return url_for("watch_detail", watch_id=watch_id)
+    return url_for("search", q=name, type="author")
+
+
+app.jinja_env.globals.update(ownership=ownership, is_owned=is_owned,
+                             has_owned=has_owned,
+                             watch_id_for=watch_id_for, author_url=author_url)
+app.jinja_env.tests["owned"] = is_owned
+
+
+@app.template_filter("localtime")
+def localtime_filter(value, fallback="never"):
+    """'2026-11-15T21:41:14Z' (stored UTC) -> '2026-11-15 13:41' in the
+    local time of the machine running the app."""
+    if not value:
+        return fallback
+    try:
+        when = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return value
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.astimezone().strftime("%Y-%m-%d %H:%M")
 
 
 @app.context_processor
-def inject_owned():
-    # asins the user owns (empty set until an Audible account is connected)
-    return {"owned_asins": db.owned_asins()}
+def inject_page_state():
+    return {
+        # for marking unreleased/pre-order books (release date in the future)
+        "today": date.today().isoformat(),
+        # pages auto-refresh while a check runs in the background
+        "check_running": _check_lock.locked(),
+        # show "Sign out" only when a password is set
+        "password_enabled": bool(_password()),
+    }
 
 
-@app.context_processor
-def inject_watch_lookup():
-    """watch_id_for(type, name): the existing watch's id, or None."""
-    by_key = {(w["type"], w["name"].strip().lower()): w["id"]
-              for w in db.list_watches()}
-
-    def watch_id_for(wtype, name):
-        return by_key.get((wtype, (name or "").strip().lower()))
-
-    return {"watch_id_for": watch_id_for}
+RETRY_AFTER_OUTAGE = timedelta(hours=1)
 
 
-@app.context_processor
-def inject_author_url():
-    """author_url(name): the author's watch page if watched, else an
-    in-app author search for them."""
-    watched = {w["name"].strip().lower(): w["id"]
-               for w in db.list_watches() if w["type"] == "author"}
-
-    def author_url(name):
-        name = name.strip()
-        watch_id = watched.get(name.lower())
-        if watch_id:
-            return url_for("watch_detail", watch_id=watch_id)
-        return url_for("search", q=name, type="author")
-
-    return {"author_url": author_url}
+def _run_check(trigger: str):
+    """Run a full check; the caller must already hold _check_lock. If
+    Audible was unreachable, try once more an hour later."""
+    try:
+        result = checker.check_all(trigger=trigger)
+        if result.get("aborted") and trigger != "retry":
+            when = datetime.now() + RETRY_AFTER_OUTAGE
+            scheduler.add_job(_retry_check, "date", run_date=when,
+                              id="retry_check", replace_existing=True)
+            log.info("Audible unreachable; retrying at %s",
+                     when.strftime("%H:%M"))
+    except Exception:  # noqa: BLE001 - logged; the check log shows the rest
+        log.exception("%s check failed", trigger.capitalize())
+    finally:
+        _check_lock.release()
 
 
 def scheduled_check():
     if _check_lock.acquire(blocking=False):
-        try:
-            checker.check_all(trigger="scheduled")
-        finally:
-            _check_lock.release()
+        _run_check("scheduled")
+
+
+def _retry_check():
+    if _check_lock.acquire(blocking=False):
+        _run_check("retry")
 
 
 def _parse_hour(value) -> int | None:
@@ -144,7 +345,11 @@ def reschedule():
         log.warning("Invalid check_hour %r in settings; using %02d:00",
                     raw, DEFAULT_CHECK_HOUR)
         hour = DEFAULT_CHECK_HOUR
-    scheduler.remove_all_jobs()
+    # replace only the daily job, so a pending outage retry survives
+    try:
+        scheduler.remove_job("daily_check")
+    except JobLookupError:
+        pass
     scheduler.add_job(scheduled_check, CronTrigger(hour=hour, minute=0),
                       id="daily_check")
     log.info("Daily check scheduled for %02d:00 local time", hour)
@@ -230,9 +435,9 @@ def watch_detail(watch_id):
     if not w:
         flash("Watch not found", "error")
         return redirect(url_for("dashboard"))
-    books = db.books_for_watch(watch_id)
-    hidden_books = [b for b in db.books_for_watch(watch_id, include_hidden=True)
-                    if b["hidden"]]
+    every = db.books_for_watch(watch_id, include_hidden=True)
+    books = [b for b in every if not b["hidden"]]
+    hidden_books = [b for b in every if b["hidden"]]
     view = request.args.get("view", "all")
     series_groups = None
     if view == "series":
@@ -292,8 +497,15 @@ def settings_page():
                   "settings not saved", "error")
             return redirect(url_for("settings_page"))
         values["check_hour"] = str(_parse_hour(values["check_hour"]))
+        port = values["smtp_port"]
+        if port and not (port.isdigit() and 1 <= int(port) <= 65535):
+            flash("SMTP port must be a number such as 465 or 587 — "
+                  "settings not saved", "error")
+            return redirect(url_for("settings_page"))
         current = db.get_settings()
-        pw = request.form.get("smtp_password", "")
+        # Google shows app passwords as "abcd efgh ijkl mnop"; the spaces
+        # aren't part of it
+        pw = "".join(request.form.get("smtp_password", "").split())
         if pw:  # blank = keep existing...
             values["smtp_password"] = pw
         elif (values["smtp_host"] != current.get("smtp_host")
@@ -305,11 +517,28 @@ def settings_page():
                 flash("Mail server or username changed — enter the app "
                       "password again", "error")
         values["email_enabled"] = "1" if request.form.get("email_enabled") else "0"
+        values["lookup_publish_dates"] = (
+            "1" if request.form.get("lookup_publish_dates") else "0")
+        marketplace_changed = (values["marketplace"]
+                               != current.get("marketplace", "us"))
         db.save_settings(values)
+        if marketplace_changed:
+            db.reset_for_marketplace_change()
         reschedule()
         flash("Settings saved", "ok")
+        if marketplace_changed:
+            flash("Marketplace changed. The next check re-records every "
+                  "watch for the new store; nothing will be flagged as "
+                  "new.", "ok")
+        saved = db.get_settings()
+        if values["email_enabled"] == "1" and not (saved.get("smtp_user")
+                                                   and saved.get("smtp_password")):
+            flash("Email is switched on, but the email address or app "
+                  "password is missing, so nothing can be sent yet. See "
+                  "the setup steps under Email notifications.", "error")
         return redirect(url_for("settings_page"))
     return render_template("settings.html", settings=db.get_settings(),
+                           access=access_info(),
                            marketplaces=sorted(audible_api.MARKETPLACES),
                            languages=audible_api.LANGUAGES)
 
@@ -335,6 +564,11 @@ def add_watch():
     wtype = request.form.get("type", "author")
     name = (request.form.get("name") or "").strip()
     asin = request.form.get("asin") or None
+    if wtype not in ("author", "series"):
+        if wants_json:
+            return {"ok": False, "error": "Unknown watch type"}, 400
+        flash("Unknown watch type", "error")
+        return redirect(request.referrer or url_for("dashboard"))
     if not name:
         if wants_json:
             return {"ok": False, "error": "Name is required"}, 400
@@ -345,9 +579,15 @@ def add_watch():
     watch_id = db.add_watch(wtype, name, asin)
     try:
         n = checker.baseline_watch(watch_id)
-        notes.append((f"Now watching {wtype} “{name}” — found {n} existing "
-                      "title(s). You'll be notified about anything newer.",
-                      "ok"))
+        if n == 0 and wtype == "author":
+            notes.append((f"Now watching author “{name}”, but Audible lists "
+                          "no titles under exactly that name. Check the "
+                          "spelling, or add them from a search result.",
+                          "error"))
+        else:
+            notes.append((f"Now watching {wtype} “{name}” — found {n} "
+                          "existing title(s). You'll be notified about "
+                          "anything newer.", "ok"))
     except Exception as e:  # noqa: BLE001
         notes.append((f"Added “{name}” but the initial fetch failed: {e}",
                       "error"))
@@ -375,22 +615,6 @@ def add_watch():
     return redirect(url_for("dashboard"))
 
 
-@app.route("/watch/add-bulk", methods=["POST"])
-def add_watch_bulk():
-    added = 0
-    for item in request.form.getlist("items"):
-        wtype, _, name = item.partition("::")
-        if wtype in ("author", "series") and name:
-            wid = db.add_watch(wtype, name, None)
-            try:
-                checker.baseline_watch(wid)
-            except Exception:  # noqa: BLE001
-                log.exception("Baseline failed for %s", name)
-            added += 1
-    flash(f"Added {added} watch(es) from your OpenAudible library", "ok")
-    return redirect(url_for("dashboard"))
-
-
 @app.route("/watch/<int:watch_id>/delete", methods=["POST"])
 def delete_watch(watch_id):
     db.remove_watch(watch_id)
@@ -400,26 +624,25 @@ def delete_watch(watch_id):
 
 @app.route("/check-now", methods=["POST"])
 def check_now():
+    """Start a check in the background: with many watches it can take
+    minutes, longer than a browser or proxy will wait for a page. The
+    dashboard refreshes itself until it's done; results land in Recent
+    checks."""
+    global _check_thread
     if not _check_lock.acquire(blocking=False):
         flash("A check is already running", "error")
         return redirect(url_for("dashboard"))
-    try:
-        result = checker.check_all(trigger="manual")
-    finally:
-        _check_lock.release()
-    if result["errors"]:
-        flash("Check finished with errors: " + "; ".join(result["errors"]),
-              "error")
-    msg = f"Check complete — {result['new_books']} new book(s) found"
-    if result["email_sent"]:
-        msg += ", email sent"
-    flash(msg, "ok")
+    _check_thread = threading.Thread(target=_run_check, args=("manual",),
+                                     daemon=True)
+    _check_thread.start()
+    flash("Checking Audible now. This page refreshes by itself; results "
+          "appear under Recent checks.", "ok")
     return redirect(url_for("dashboard"))
 
 
 @app.route("/book/<asin>/<int:watch_id>/seen", methods=["POST"])
 def book_seen(asin, watch_id):
-    db.mark_seen(asin, watch_id)
+    db.mark_seen(asin)
     return redirect(request.referrer or url_for("dashboard"))
 
 
@@ -502,11 +725,49 @@ def account_sync():
 
 @app.route("/account/disconnect", methods=["POST"])
 def account_disconnect():
-    account.disconnect()
-    flash("Audible account disconnected and owned-library data removed. "
-          "You can also deregister the device under Amazon's "
-          "“Manage Your Content and Devices”.", "ok")
+    if account.disconnect():
+        flash("Audible account disconnected: this app's device was removed "
+              "from your Amazon account and the owned-library data deleted.",
+              "ok")
+    else:
+        flash("Disconnected and owned-library data deleted, but Amazon "
+              "couldn't be told. Remove the “Audible Watcher” device "
+              "yourself under Amazon's “Manage Your Content and "
+              "Devices”.", "error")
     return redirect(url_for("account_page"))
+
+
+@app.route("/healthz")
+def healthz():
+    """Liveness check for Docker and for the desktop launcher, which uses
+    the "app" field to tell this app apart from anything else on the port.
+    Reveals nothing else, so it needs no sign-in."""
+    return {"app": "audible-watcher", "ok": True}
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not _password():
+        return redirect(url_for("dashboard"))
+    error = None
+    if request.method == "POST":
+        typed = request.form.get("password", "").encode()
+        if secrets.compare_digest(typed, _password().encode()):
+            session["signed_in"] = _password_tag()
+            session.permanent = True  # stay signed in for 30 days
+            return redirect(_safe_next(request.form.get("next")))
+        log.warning("Failed sign-in from %s", request.remote_addr)
+        time.sleep(1)  # slow down password guessing
+        error = "That password isn't right."
+    # keep where the user was heading across a wrong attempt
+    return render_template("login.html", error=error,
+                           next=request.values.get("next", ""))
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    session.pop("signed_in", None)
+    return redirect(url_for("login"))
 
 
 @app.route("/test-email", methods=["POST"])
@@ -515,7 +776,8 @@ def test_email():
         checker.send_test_email(db.get_settings())
         flash("Test email sent — check your inbox", "ok")
     except Exception as e:  # noqa: BLE001
-        flash(f"Test email failed: {e}", "error")
+        flash(f"Test email failed: {checker.explain_smtp_error(e)}",
+              "error")
     return redirect(url_for("settings_page"))
 
 

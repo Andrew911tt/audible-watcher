@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block title %}Sign in — Audible Watcher{% endblock %}
+{% block content %}
+
+<h1>Sign in</h1>
+<p class="muted">This Audible Watcher is password-protected.</p>
+
+{% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+
+<form method="post" action="{{ url_for('login') }}" class="settings-form login-form">
+  <label>Password
+    <input type="password" name="password" autocomplete="current-password"
+           required autofocus>
+  </label>
+  <input type="hidden" name="next" value="{{ next }}">
+  <div class="btn-row">
+    <button class="btn btn-primary" type="submit">Sign in</button>
+  </div>
+{{ csrf_field() }}</form>
+
+{% endblock %}

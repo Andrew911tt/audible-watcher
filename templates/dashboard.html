@@ -19,10 +19,10 @@
         <td>{% if w.new_count %}<span class="badge">{{ w.new_count }}</span>{% else %}—{% endif %}</td>
         <td>{% if w.preorder_count %}<span class="badge badge-preorder">{{ w.preorder_count }}</span>{% else %}—{% endif %}</td>
         <td>{{ w.latest_release or '—' }}</td>
-        <td class="muted small">{{ w.last_checked_at or 'never' }}</td>
+        <td class="muted small">{{ w.last_checked_at|localtime }}</td>
         <td>
           <form method="post" action="{{ url_for('delete_watch', watch_id=w.id) }}"
-                onsubmit="return confirm('Stop watching {{ w.name }}?')">
+                data-confirm="Stop watching {{ w.name }}?">
             <button class="btn btn-small btn-danger" type="submit">Remove</button>
           {{ csrf_field() }}</form>
         </td>
@@ -32,14 +32,25 @@
   </table>
 {% endmacro %}
 
+{% block head %}
+  {% if check_running %}<meta http-equiv="refresh" content="8">{% endif %}
+{% endblock %}
+
 {% block content %}
 
 <div class="page-head">
   <h1>Dashboard</h1>
   <form method="post" action="{{ url_for('check_now') }}">
-    <button class="btn btn-primary" type="submit">Check Audible now</button>
+    <button class="btn btn-primary" type="submit"
+            {% if check_running %}disabled{% endif %}>
+      {{ 'Checking…' if check_running else 'Check Audible now' }}</button>
   {{ csrf_field() }}</form>
 </div>
+
+{% if check_running %}
+  <div class="notice">⏳ Checking Audible for new books… this page refreshes
+    by itself until it's done.</div>
+{% endif %}
 
 {% if settings.email_enabled != '1' %}
   <div class="notice">Email notifications are off — turn them on in
@@ -147,12 +158,12 @@
 <section>
   <h2>Recent checks</h2>
   <table class="watch-table">
-    <thead><tr><th>When (UTC)</th><th>Trigger</th><th>New books</th>
+    <thead><tr><th>When</th><th>Trigger</th><th>New books</th>
                <th>Email</th><th>Errors</th></tr></thead>
     <tbody>
       {% for c in checks %}
       <tr>
-        <td class="small">{{ c.ran_at }}</td>
+        <td class="small">{{ c.ran_at|localtime }}</td>
         <td>{{ c.trigger }}</td>
         <td>{{ c.new_books }}</td>
         <td>{{ '✉️ sent' if c.email_sent else '—' }}</td>

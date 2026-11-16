@@ -1,5 +1,6 @@
-Flask>=3.0
-requests>=2.31
+# Upper bounds keep a future major release from breaking installs.
+Flask>=3.0,<4
+requests>=2.31,<3
 APScheduler>=3.10,<4
-audible>=0.10
-waitress>=3.0
+audible>=0.10,<0.13
+waitress>=3.0,<4

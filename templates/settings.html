@@ -13,6 +13,9 @@
         <option value="{{ m }}" {% if settings.marketplace == m %}selected{% endif %}>{{ m }}</option>
         {% endfor %}
       </select>
+      <span class="muted small">The Audible store you buy from. Changing it
+        re-records all your watches for the new store on the next check;
+        nothing gets flagged as new.</span>
     </label>
     <label>Language
       <select name="language">
@@ -26,23 +29,133 @@
         your library and alerts.</span>
     </label>
     <label>Daily check time (hour, 0–23, local)
-      <input type="number" name="check_hour" min="0" max="23"
+      <input type="number" name="check_hour" min="0" max="23" required
              value="{{ settings.check_hour }}">
     </label>
+    <label class="checkbox">
+      <input type="checkbox" name="lookup_publish_dates"
+             {% if settings.lookup_publish_dates != '0' %}checked{% endif %}>
+      Show when books first came out in print
+    </label>
+    <span class="muted small checkbox-help">Looks up each book's title and
+      author on Google Books and Open Library. Untick to keep those lookups
+      off; nothing else is sent to them.</span>
   </fieldset>
 
-  <fieldset>
-    <legend>Email notifications (Gmail)</legend>
+  {% set email_ready = settings.smtp_user and settings.smtp_password %}
+  <fieldset id="email">
+    <legend>Email notifications</legend>
+
+    <p class="help-text">After each check (daily, or when you click
+      <em>Check Audible now</em>), Audible Watcher sends <strong>one digest
+      email</strong> listing any new books from your watched authors and
+      series. No new books, no email. It sends through your own email
+      account, so the message comes from you, to you.</p>
+
+    <div class="notice email-status">
+      {% if settings.email_enabled == '1' and email_ready %}
+        ✅ <strong>On</strong> — sending to
+        {{ settings.email_to or settings.smtp_user }} via {{ settings.smtp_host }}.
+        Use <em>Send test email</em> below to confirm it works.
+      {% elif email_ready %}
+        ⏸️ <strong>Set up but switched off</strong> — tick
+        “Send me an email” below and save to turn it on.
+      {% else %}
+        ✉️ <strong>Not set up yet.</strong> Follow the steps below — it takes
+        about 5 minutes.
+      {% endif %}
+    </div>
+
+    <details class="help-box" {% if not email_ready %}open{% endif %}>
+      <summary>How to set up Gmail (step by step)</summary>
+      <p class="muted small">Gmail doesn't let apps use your normal password.
+        Instead you create an <strong>app password</strong>: a 16-letter
+        password just for Audible Watcher that you can revoke anytime
+        without changing your real password.</p>
+      <ol class="steps">
+        <li><strong>Turn on 2-Step Verification</strong> (app passwords
+          require it). Open
+          <a href="https://myaccount.google.com/signinoptions/twosv"
+             target="_blank" rel="noopener">Google Account → 2-Step
+          Verification</a>, sign in, and follow the prompts. Skip this if
+          it's already on.</li>
+        <li><strong>Create the app password.</strong> Open
+          <a href="https://myaccount.google.com/apppasswords"
+             target="_blank" rel="noopener">Google Account → App
+          passwords</a>, type the name <code>Audible Watcher</code>, and
+          click <em>Create</em>.</li>
+        <li><strong>Copy the 16-letter code</strong> Google shows (it looks
+          like <code>abcd efgh ijkl mnop</code>). Google only shows it once;
+          if you lose it, just delete it and create a new one.</li>
+        <li><strong>Fill in the form below:</strong>
+          <ul>
+            <li>SMTP server <code>smtp.gmail.com</code>, port
+              <code>465</code>, security <em>SSL</em> (already filled in
+              by default).</li>
+            <li>Email address: your full Gmail address.</li>
+            <li>App password: paste the code (spaces are fine).</li>
+            <li>Send notifications to: where you want the emails — your
+              Gmail address or any other address.</li>
+          </ul></li>
+        <li><strong>Tick “Send me an email…”</strong>, click
+          <em>Save settings</em>, then click <em>Send test email</em>.
+          The test should arrive within a minute (check Spam the first
+          time, and mark it “Not spam”).</li>
+      </ol>
+      <p class="muted small">Google Workspace (work or school) accounts: your
+        administrator may have turned app passwords off. If the App
+        passwords page says it isn't available, use a personal Gmail
+        account instead.</p>
+    </details>
+
+    <details class="help-box">
+      <summary>Using a different email provider</summary>
+      <p class="muted small">Any provider that supports SMTP works. Click
+        one to fill in its server settings, then enter your address and an
+        app password from that provider.</p>
+      <table class="provider-table">
+        <thead><tr><th>Provider</th><th>SMTP server</th><th>Port</th>
+          <th>Security</th><th></th></tr></thead>
+        <tbody>
+          {% for name, host, port, sec in [
+              ("Gmail", "smtp.gmail.com", "465", "ssl"),
+              ("Yahoo Mail", "smtp.mail.yahoo.com", "465", "ssl"),
+              ("iCloud Mail", "smtp.mail.me.com", "587", "starttls"),
+              ("Fastmail", "smtp.fastmail.com", "465", "ssl"),
+              ("Zoho Mail", "smtp.zoho.com", "465", "ssl")] %}
+          <tr>
+            <td>{{ name }}</td><td><code>{{ host }}</code></td>
+            <td>{{ port }}</td><td>{{ 'SSL' if sec == 'ssl' else 'STARTTLS' }}</td>
+            <td><button class="btn btn-small js-preset" type="button"
+                        data-host="{{ host }}" data-port="{{ port }}"
+                        data-security="{{ sec }}">Use</button></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="muted small">Yahoo, iCloud and Fastmail all require an
+        app-specific password, created in that provider's account security
+        settings, just like Gmail. Outlook.com / Hotmail is not listed:
+        Microsoft has been phasing out password sign-in for apps like this
+        one, so it usually won't work.</p>
+    </details>
+
     <label class="checkbox">
       <input type="checkbox" name="email_enabled"
              {% if settings.email_enabled == '1' %}checked{% endif %}>
       Send me an email when new books are found
     </label>
-    <label>SMTP host
-      <input type="text" name="smtp_host" value="{{ settings.smtp_host }}">
+    <label>SMTP server
+      <input type="text" name="smtp_host" value="{{ settings.smtp_host }}"
+             placeholder="smtp.gmail.com">
+      <span class="muted small">Your provider's outgoing mail server. For
+        Gmail: <code>smtp.gmail.com</code>.</span>
     </label>
-    <label>SMTP port
-      <input type="number" name="smtp_port" value="{{ settings.smtp_port }}">
+    <label>Port
+      <input type="number" name="smtp_port" value="{{ settings.smtp_port }}"
+             placeholder="465">
+      <span class="muted small">Must match the security setting: usually
+        465 for SSL, 587 for STARTTLS.</span>
     </label>
     <label>Security
       <select name="smtp_security">
@@ -50,23 +163,31 @@
         <option value="starttls" {% if settings.smtp_security == 'starttls' %}selected{% endif %}>STARTTLS (port 587)</option>
       </select>
     </label>
-    <label>Gmail address (SMTP username)
+    <label>Email address (SMTP username)
       <input type="email" name="smtp_user" value="{{ settings.smtp_user }}"
-             placeholder="you@gmail.com">
+             placeholder="you@gmail.com" autocomplete="username">
+      <span class="muted small">The full address of the account that sends
+        the emails.</span>
     </label>
-    <label>Gmail app password
-      <input type="password" name="smtp_password"
-             placeholder="{% if settings.smtp_password %}•••••••• (leave blank to keep){% else %}16-character app password{% endif %}">
-      <span class="muted small">Create one at
-        myaccount.google.com → Security → 2-Step Verification → App passwords.
-        Your regular Gmail password will not work.</span>
+    <label>App password
+      <input type="password" name="smtp_password" autocomplete="new-password"
+             placeholder="{% if settings.smtp_password %}•••••••• saved (leave blank to keep){% else %}16-letter app password{% endif %}">
+      <span class="muted small">Not your normal email password — see the
+        steps above. It's stored only in this app's database on this
+        machine. For your security, if you change the server or email
+        address, you'll be asked to enter it again.</span>
     </label>
     <label>Send notifications to
       <input type="text" name="email_to" value="{{ settings.email_to }}"
              placeholder="you@example.com (comma-separate multiple)">
+      <span class="muted small">Leave blank to send to the address above.
+        Separate several addresses with commas.</span>
     </label>
-    <label>From address (optional, defaults to Gmail address)
-      <input type="text" name="email_from" value="{{ settings.email_from }}">
+    <label>From address (optional)
+      <input type="text" name="email_from" value="{{ settings.email_from }}"
+             placeholder="defaults to the address above">
+      <span class="muted small">Usually leave blank. Gmail always sends from
+        your own address anyway.</span>
     </label>
   </fieldset>
 
@@ -75,8 +196,106 @@
   </div>
 {{ csrf_field() }}</form>
 
-<form method="post" action="{{ url_for('test_email') }}" class="btn-row">
+<form method="post" action="{{ url_for('test_email') }}" class="btn-row test-email">
   <button class="btn" type="submit">Send test email</button>
+  <span class="muted small">Sends a short test message using the
+    <strong>saved</strong> settings — click <em>Save settings</em> first if
+    you changed anything.</span>
 {{ csrf_field() }}</form>
+
+<details class="help-box troubleshooting">
+  <summary>Email not working? Troubleshooting</summary>
+  <dl>
+    <dt>“Username and password not accepted” / authentication failed</dt>
+    <dd>You probably entered your normal password. Create an app password
+      (steps above) and paste it in. Also check the email address is
+      complete (<code>you@gmail.com</code>, not just <code>you</code>).</dd>
+    <dt>“Wrong version number”, SSL errors, or the test hangs</dt>
+    <dd>The port and security setting don't match. Use port 465 with SSL,
+      or port 587 with STARTTLS.</dd>
+    <dt>“Could not connect” / name not found</dt>
+    <dd>Check the SMTP server name for typos. If this app runs on a home
+      server or NAS, make sure it can reach the internet and that your
+      network doesn't block outgoing mail ports.</dd>
+    <dt>Test says it was sent, but nothing arrives</dt>
+    <dd>Look in Spam/Junk and mark it “Not spam”. Check the “Send
+      notifications to” address for typos.</dd>
+    <dt>It worked before and suddenly stopped</dt>
+    <dd>Changing your Google password revokes all app passwords. Create a
+      new one and paste it in.</dd>
+  </dl>
+</details>
+
+<section class="access-panel" id="access">
+  <h2>Access from other devices</h2>
+  <p class="muted small">These are set outside the app, not on this page,
+    so a web page can never switch them off. They're set with environment
+    variables, and the steps depend on how you installed Audible Watcher:
+    <a href="{{ access.help_url }}" target="_blank" rel="noopener">see
+    “Opening it from other devices”</a>.</p>
+  <table class="access-table">
+    <tr>
+      <th>Reachable from</th>
+      <td>
+        {% if access.network %}
+          ✅ Other devices on your network
+          <span class="muted small">(<code>AW_HOST={{ access.listen }}</code>)</span>
+        {% else %}
+          🔒 This computer only
+          <span class="muted small">— set <code>AW_HOST=0.0.0.0</code> to open
+          it from your phone or other computers</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <th>You're using</th>
+      <td><code>{{ access.address }}</code> ✅ allowed</td>
+    </tr>
+    <tr>
+      <th>Allowed addresses</th>
+      <td>IP addresses, <code>localhost</code>, single names (like
+        <code>nas</code>) and <code>.local</code> / <code>.lan</code> /
+        <code>.home</code> / <code>.home.arpa</code> / <code>.internal</code>
+        names{% if access.extra_hosts %}, plus
+          {% for h in access.extra_hosts %}<code>{{ h }}</code>{{ ", " if not loop.last }}{% endfor %}
+          <span class="muted small">(<code>AW_ALLOWED_HOSTS</code>)</span>
+        {% else %}.
+          <span class="muted small">To use a full domain name such as
+          <code>nas.example.com</code>, add it to
+          <code>AW_ALLOWED_HOSTS</code>.</span>
+        {% endif %}
+      </td>
+    </tr>
+    <tr>
+      <th>Password</th>
+      <td>
+        {% if access.password %}
+          🔒 On — every device signs in once, then stays signed in for 30
+          days <span class="muted small">(<code>AW_PASSWORD</code>)</span>
+        {% elif access.network %}
+          ⚠️ Off — anyone who can reach this address can use the app. Set
+          <code>AW_PASSWORD</code> unless you trust everyone on your
+          network.
+        {% else %}
+          Off <span class="muted small">— not needed while only this
+          computer can open the app</span>
+        {% endif %}
+      </td>
+    </tr>
+  </table>
+</section>
+
+<script>
+// "Use" buttons in the provider table fill in that provider's server settings
+document.querySelectorAll('.js-preset').forEach(function (btn) {
+  btn.addEventListener('click', function () {
+    var form = document.querySelector('.settings-form');
+    form.smtp_host.value = btn.dataset.host;
+    form.smtp_port.value = btn.dataset.port;
+    form.smtp_security.value = btn.dataset.security;
+    form.smtp_user.focus();
+  });
+});
+</script>
 
 {% endblock %}

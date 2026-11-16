@@ -30,7 +30,17 @@ def _norm(s: str | None) -> str:
 
 
 def _titles_match(a: str, b: str) -> bool:
-    return bool(a) and bool(b) and (a in b or b in a)
+    """Same book title, allowing one side to add a subtitle or series tag
+    ('the way of kings' vs 'the way of kings the stormlight archive book
+    1'). The shorter title must be the start of the longer one, on a word
+    boundary, and a one-word title must match exactly — otherwise 'It'
+    would match 'It Ends with Us' or 'Itch'."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    short, long_ = sorted((a, b), key=len)
+    return len(short.split()) > 1 and long_.startswith(short + " ")
 
 
 def _google_published(title: str, author: str | None) -> tuple[str | None, bool]:

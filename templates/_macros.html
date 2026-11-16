@@ -28,18 +28,24 @@
 {% endmacro %}
 
 {% macro book_card(b, show_source=False, show_owned=True) %}
-  {% set preorder = not b.release_date or b.release_date > today %}
+  {# dated future release = orderable pre-order; no date = TBA placeholder
+     (Audible has no store page for it yet, so it isn't a pre-order) #}
+  {% set preorder = b.release_date and b.release_date > today %}
+  {% set upcoming = preorder or not b.release_date %}
   <div class="book-card {% if b.is_new %}new{% endif %} {% if preorder %}preorder{% endif %}">
     {% if b.image_url %}<img src="{{ b.image_url }}" alt="">{% endif %}
     <div class="book-info">
-      {% set owned = show_owned and b.asin in owned_asins %}
+      {% set own = ownership(b) if show_owned else None %}
       {% if b.is_new %}<span class="badge">NEW</span>{% endif %}
-      {% if preorder and owned %}
+      {% if own == 'preordered' %}
         <span class="badge badge-preordered"
               title="You've already pre-ordered this">PRE-ORDERED ✓</span>
       {% elif preorder %}
         <span class="badge badge-preorder">PRE-ORDER</span>
-      {% elif owned %}
+      {% elif upcoming %}
+        <span class="badge badge-tba"
+              title="Announced, but Audible has no release date or store page yet">TBA</span>
+      {% elif own == 'owned' %}
         <span class="badge badge-owned">OWNED</span>
       {% endif %}
       <a class="book-title" href="{{ b.url }}" target="_blank">{{ b.title }}</a>

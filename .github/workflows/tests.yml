@@ -5,13 +5,52 @@ on:
 jobs:
   test:
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
+        python: ["3.12"]
+        include:  # oldest supported (README says 3.10+) and newest
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: ubuntu-latest
+            python: "3.14"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python }}
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest tests -q
+
+  # Build the Docker image and prove it starts, serves, runs as non-root
+  # and can write its data folder.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t audible-watcher:ci .
+      - name: Start container
+        run: |
+          mkdir -p data && sudo chown 1000:1000 data
+          docker run -d --name aw -p 5055:5055 -v "$PWD/data:/data" audible-watcher:ci
+      - name: Wait until it answers
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5055/healthz; then exit 0; fi
+            sleep 2
+          done
+          docker logs aw
+          exit 1
+      - name: Check user, data folder and pages
+        run: |
+          test "$(docker exec aw id -u)" = "1000"
+          test -f data/watcher.db
+          curl -fsS -o /dev/null http://127.0.0.1:5055/
+          curl -fsS -o /dev/null http://127.0.0.1:5055/settings
+          # unknown hostnames are refused (DNS-rebinding protection)
+          test "$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: evil.example.com' http://127.0.0.1:5055/)" = "400"
+      - name: Container logs
+        if: always()
+        run: docker logs aw

@@ -49,8 +49,9 @@ class CSRFClient(FlaskClient):
     def open(self, *args, **kwargs):
         data = kwargs.get("data")
         if (kwargs.get("method", "GET").upper() == "POST"
-                and isinstance(data, dict) and "csrf_token" not in data):
-            kwargs["data"] = {**data, "csrf_token": TEST_CSRF_TOKEN}
+                and (data is None or isinstance(data, dict))
+                and "csrf_token" not in (data or {})):
+            kwargs["data"] = {**(data or {}), "csrf_token": TEST_CSRF_TOKEN}
         return super().open(*args, **kwargs)
 
 

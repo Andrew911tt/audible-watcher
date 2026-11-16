@@ -5,16 +5,25 @@ favorite authors and series** and **emails you** when something new shows up
 (including pre-orders, as soon as they're listed).
 
 It uses Audible's public catalog API — no Audible login required, no
-credentials, no scraping of web pages. Everything runs on your own computer;
-nothing is sent anywhere except the Audible catalog lookups and your own
-email server.
+credentials, no scraping of web pages. Everything runs on your own computer.
+
+**What leaves your machine**, and nothing else:
+
+- **Audible's catalog API** — searches for the authors and series you watch.
+- **Google Books and Open Library** — a book's title and first author, to
+  show when it first came out in print. You can turn this off in Settings.
+- **Amazon's image servers** — your browser loads the cover pictures.
+- **Amazon sign-in** — only if you connect your Audible account (optional).
+- **Your own email server** — to send you the notification emails.
 
 Optionally, you can connect your Audible account (Account page) to see
-OWNED badges on books you already have and PRE-ORDERED tags on pre-orders.
-You sign in on amazon.com in your own browser; the app never sees your
-password and stores only revocable device tokens (`audible_auth.json` —
-treat it like a key and don't share it; revoke it anytime from Amazon's
-"Manage Your Content and Devices").
+OWNED badges on books you already have and PRE-ORDERED tags on the exact
+editions you've pre-ordered. You sign in on amazon.com in your own browser;
+the app never sees your password and stores only revocable device tokens
+(`audible_auth.json` — treat it like a key and don't share it). **Disconnect**
+on the Account page removes the app's device from your Amazon account and
+deletes the tokens; you can also revoke it from Amazon's "Manage Your
+Content and Devices".
 
 > Audible Watcher is an independent open-source project. It is not
 > affiliated with or endorsed by Audible or Amazon.
@@ -26,11 +35,27 @@ treat it like a key and don't share it; revoke it anytime from Amazon's
 - **Watch authors or series** — search Audible from the app and add them.
   Watching a series also watches its author.
 - **Daily automatic check** (time configurable) plus a "Check Audible now"
-  button.
-- **Email digest** via Gmail (or any SMTP server) when new titles appear.
-- **No false alarms**: when you add a watch, everything currently on Audible
-  is recorded as a baseline. Only titles that appear *after* that are flagged.
-  Foreign-language and other-region editions are filtered out.
+  button that runs in the background while the page updates itself.
+- **Email digest** via Gmail or any other email provider when new titles
+  appear, with step-by-step setup on the Settings page.
+- **No false alarms**:
+  - When you add a watch, everything currently on Audible is recorded as a
+    baseline. Only titles that appear *after* that are flagged.
+  - Foreign-language editions are filtered out, and each new book is checked
+    against your Audible store before it's emailed, so other-region
+    editions never reach your inbox.
+  - If Audible can't be reached when you add a watch, or you switch to a
+    different Audible store, the next check quietly records a new baseline
+    instead of flagging everything.
+- **Your library** (optional) — OWNED and PRE-ORDERED badges, and a Library
+  tab grouped by author or series. Books you own in another region's edition
+  count as owned.
+- **First published** dates: see when a book came out in print before the
+  audiobook (can be turned off).
+- **Safe on your network** — an optional password, protection against
+  websites that try to reach the app through your browser, and an Access
+  panel in Settings showing how yours is set up. See
+  [Opening it from other devices](#opening-it-from-other-devices).
 
 ## Install
 
@@ -62,6 +87,11 @@ docker compose up -d
 
 Then open **http://your-server:5055**. Data is kept in `./data`.
 
+**Upgrading a Docker install from 1.0.0 or 1.0.1:** since 1.0.2 the
+container runs as an unprivileged user (uid 1000) instead of root. Give it
+the data folder once before starting the new version:
+`sudo chown -R 1000:1000 ./data`.
+
 ### From source (Windows, macOS, Linux)
 
 Requires Python 3.10+ ([python.org](https://www.python.org/downloads/) —
@@ -82,21 +112,34 @@ to `app.py` (`watcher.db`, `audible_auth.json`).
 - Prefer the tray app? `pip install -r requirements-desktop.txt` then
   `python desktop.py`.
 
-## Set up email (Gmail)
+## Set up email
 
-Gmail no longer allows plain passwords for apps, so you need an
-**app password** (a one-time, 16-character password just for this app):
+The **Settings** page walks you through this step by step, with links to
+the right Google pages and a troubleshooting list. In short, for Gmail:
 
-1. Go to https://myaccount.google.com → **Security**.
-2. Make sure **2-Step Verification** is turned on (app passwords require it).
-3. Search for **App passwords** (or go to
-   https://myaccount.google.com/apppasswords), create one named
-   "Audible Watcher", and copy the 16-character code.
-4. In Audible Watcher → **Settings**: enter your Gmail address, paste the app
+Gmail doesn't let apps use your normal password, so you create an
+**app password** (a 16-letter password just for this app, which you can
+revoke anytime without changing your real password):
+
+1. Turn on **2-Step Verification** at
+   https://myaccount.google.com/signinoptions/twosv (app passwords
+   require it).
+2. Create an app password named "Audible Watcher" at
+   https://myaccount.google.com/apppasswords and copy the code. Pasting it
+   with the spaces Google shows is fine.
+3. In Audible Watcher → **Settings**: enter your Gmail address, paste the app
    password, set "Send notifications to", tick **Send me an email**, save,
    then click **Send test email**.
 
-Any other SMTP server works too — just change host/port/security.
+**Other providers:** Settings has a table of Yahoo Mail, iCloud Mail,
+Fastmail and Zoho Mail with a **Use** button that fills in the server
+settings; those providers need an app password too. Any other SMTP server
+works if you enter its server, port and security setting. Outlook.com /
+Hotmail usually won't work, because Microsoft is phasing out password
+sign-in for apps like this one.
+
+If a test email fails, the error message says what to fix (for example
+"use an app password, not your normal password").
 
 ## Run it automatically (source / server installs)
 
@@ -119,23 +162,146 @@ sudo systemctl enable --now audible-watcher
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AW_HOST` | `127.0.0.1` | Address to listen on. `0.0.0.0` makes it reachable from other devices on your network (there is no login, so only do this on a trusted network). |
+| `AW_HOST` | `127.0.0.1` | Address to listen on. `0.0.0.0` makes it reachable from other devices on your network. There's no login unless you set `AW_PASSWORD`, so only do this on a trusted network. |
 | `AW_PORT` | `5055` | Port. |
 | `AW_DATA_DIR` | see above | Folder for `watcher.db` and `audible_auth.json`. |
+| `AW_ALLOWED_HOSTS` | *(empty)* | Extra hostnames you open the app by, comma-separated (e.g. `nas.example.com`). IP addresses, `localhost`, names without a dot and `.local` / `.lan` / `.home` / `.home.arpa` / `.internal` names always work. Other names are refused, which blocks websites that try to reach the app through your browser (DNS rebinding). See [Opening it from other devices](#opening-it-from-other-devices). |
+| `AW_PASSWORD` | *(empty)* | Set it to require a password to open the app. Recommended if anyone you don't trust can reach it. See [Opening it from other devices](#opening-it-from-other-devices). |
+
+How to set an environment variable depends on how you installed the app —
+the next section has the exact steps for each.
+
+## Opening it from other devices
+
+By default Audible Watcher only answers on the computer it runs on
+(`http://localhost:5055`), and there's nothing to set up. The Docker image
+is the exception: it's reachable from your network out of the box.
+
+Three settings control access from other devices. You can check how yours
+are set at the bottom of the **Settings** page.
+
+| Setting | When you need it |
+|---|---|
+| `AW_HOST=0.0.0.0` | To open the app from a phone, tablet or another computer at all. (Docker already does this.) |
+| `AW_ALLOWED_HOSTS` | Only if you open the app by a **full domain name**, like `nas.example.com` or `audible.mydomain.net`. IP addresses (`http://192.168.1.20:5055`), `localhost`, single names (`http://nas:5055`) and `.local` / `.lan` / `.home` / `.home.arpa` / `.internal` names always work. |
+| `AW_PASSWORD` | If anyone you don't fully trust can reach the app: shared Wi-Fi, housemates, or any access from outside your home. Without it, anyone who can reach the port can use the app. |
+
+**Why the hostname check?** A malicious website can point its own domain
+name at your server and then use your browser to talk to Audible Watcher
+("DNS rebinding"). Those requests carry the website's name, so refusing
+names the app doesn't recognise stops it. If you open the app by a name
+it doesn't know, you'll see an *“Address not recognised”* page; add that
+name to `AW_ALLOWED_HOSTS` as shown below.
+
+Several names: separate them with commas, e.g.
+`AW_ALLOWED_HOSTS=nas.example.com,audible.example.net`.
+
+### Docker Compose
+
+In `docker-compose.yml`, add the lines under `environment:` (two are
+already there, commented out), then run `docker compose up -d`:
+
+```yaml
+    environment:
+      - TZ=America/Los_Angeles
+      - AW_ALLOWED_HOSTS=nas.example.com
+      - AW_PASSWORD=choose-a-password
+```
+
+### docker run
+
+Add `-e` options and recreate the container:
+
+```
+docker run -d -p 5055:5055 -v ./data:/data \
+  -e AW_ALLOWED_HOSTS=nas.example.com \
+  -e AW_PASSWORD=choose-a-password \
+  audible-watcher
+```
+
+### Linux service (systemd)
+
+```
+sudo systemctl edit audible-watcher
+```
+
+In the editor that opens, add the lines you need, save and close:
+
+```ini
+[Service]
+Environment=AW_HOST=0.0.0.0
+Environment=AW_ALLOWED_HOSTS=nas.example.com
+Environment=AW_PASSWORD=choose-a-password
+```
+
+Then `sudo systemctl restart audible-watcher`.
+
+### Windows installer
+
+The desktop app only answers on this PC, so you normally don't need any of
+this. To use it from other devices anyway:
+
+1. Open **Start**, search for **“Edit environment variables for your
+   account”** and open it.
+2. Click **New…** and add `AW_HOST` = `0.0.0.0`. Add `AW_PASSWORD` the same
+   way, and `AW_ALLOWED_HOSTS` if you'll use a full domain name.
+3. Right-click the Audible Watcher tray icon → **Quit**, then start it again
+   from the Start menu. Windows may ask to allow it through the firewall.
+
+### From source
+
+macOS / Linux — put the settings in front of the start command:
+
+```
+AW_HOST=0.0.0.0 AW_PASSWORD=choose-a-password ./start.sh
+```
+
+Windows — add `set` lines to `start.bat` before `python app.py`:
+
+```bat
+set AW_HOST=0.0.0.0
+set AW_PASSWORD=choose-a-password
+python app.py
+```
+
+**Signing in:** with `AW_PASSWORD` set, every device asks for the password
+once and then stays signed in for 30 days (**Sign out** is in the menu).
+Changing the password signs every device out.
 
 ## Notes
 
 - The daily check runs at the hour set in Settings (default 8 AM, local time
-  of the machine running the app).
+  of the machine running the app). Times on the pages are shown in that
+  local time too.
+- If Audible can't be reached for several watches in a row, the check stops
+  early instead of waiting out every timeout, notes it under Recent checks,
+  and tries again an hour later.
 - Back up `watcher.db` to keep your watch list; delete it to start fresh.
-- Your Gmail app password is stored in that local database in plain text —
-  fine for a personal machine, but don't share the file. You can revoke the
-  app password anytime from your Google account.
+- Your email app password is stored in that local database in plain text —
+  fine for a personal machine, but don't share the file. It's never shown
+  on any page, and it's cleared if you change the mail server or email
+  address, so it can only ever be sent to the server you entered it for.
+  You can revoke the app password anytime from your email provider.
+- Email off: books found while email is switched off show on the dashboard
+  only. They aren't saved up for one huge email when you switch it on, and
+  books you've already marked seen are never emailed.
 - Marketplace: defaults to Audible US (audible.com). Change it in Settings if
-  you shop on a different regional store.
+  you shop on a different regional store. Each store lists many books under
+  different IDs, so after a change the next check quietly re-records all
+  your watches for the new store; nothing is flagged as new.
+- Author watches match the exact name Audible credits (ignoring dots,
+  spaces and capitals), including co-written books. Books where the author
+  only wrote a foreword, an introduction or a translation aren't included.
+  If an author watch finds nothing, it shows a warning to check the
+  spelling.
+- A book that's in two series shows its number in each series on that
+  series' page.
 - A book that matches two watches (e.g. the author *and* the series) shows
   once on the dashboard, pre-orders and in emails, credited to the series.
   Each watch's own page still lists it. Marking it seen clears it everywhere.
+- Books announced without a release date get a grey **TBA** badge. They
+  aren't emailed until Audible gives them a date and they can be checked
+  against your store.
 
 ## Development
 
@@ -144,7 +310,14 @@ pip install -r requirements-dev.txt
 python -m pytest tests
 ```
 
-The tests use a mocked Audible API, so no network is needed.
+The tests use a mocked Audible API (and fake email and metadata servers),
+so no network is needed.
+
+GitHub Actions runs the tests on every push: on Windows and Linux with
+Python 3.12, plus Linux with Python 3.10 (the oldest supported) and 3.14.
+It also builds the Docker image and checks that the container starts,
+runs as a non-root user, can write its data folder and refuses unknown
+hostnames.
 
 **Building the Windows installer yourself:** install Python 3.12 and
 [Inno Setup 6](https://jrsoftware.org/isinfo.php), then run

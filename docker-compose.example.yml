@@ -8,5 +8,7 @@ services:
     ports: ["5055:5055"]
     environment:
       - TZ=America/Los_Angeles
+      # - AW_ALLOWED_HOSTS=nas.example.com   # if you open it by a full domain name
+      # - AW_PASSWORD=change-me             # require a password to open the app
     volumes:
       - ./data:/data

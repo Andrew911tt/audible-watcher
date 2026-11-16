@@ -35,21 +35,53 @@ def test_recheck_does_not_realert(watched):
 def test_email_digest(watched):
     mock_api.state["include_new"] = True
     checker.check_all()
-    pending = db.unnotified_books()
-    assert len(pending) == 2
-    subject, html, text = checker.build_email(pending)
+    rows = (db.new_books(watched["author"])
+            + db.new_books(watched["series"]))
+    assert len(rows) == 2
+    subject, html, text = checker.build_email(rows)
     assert "2 new books" in subject
     assert "The Third Book" in html
     assert "2099-10-20" in text
-    db.mark_notified([(b["asin"], b["watch_id"]) for b in pending])
+
+
+def test_email_off_does_not_save_up_a_backlog(watched, monkeypatch):
+    """Books found while email is off are on the dashboard; switching email
+    on later must not send every one of them in one huge digest."""
+    mock_api.state["include_new"] = True
+    checker.check_all()  # email off
     assert db.unnotified_books() == []
+    sent = []
+    monkeypatch.setattr(checker, "send_new_release_email",
+                        lambda books, settings: sent.append(books))
+    db.save_settings({"email_enabled": "1"})
+    checker.check_all()
+    assert sent == []
+
+
+def test_seen_books_are_not_emailed(watched, monkeypatch):
+    """A book marked seen before its email went out (say SMTP was failing)
+    isn't emailed afterwards."""
+    sent, fail = [], [True]
+
+    def send(books, settings):
+        if fail[0]:
+            raise OSError("smtp down")
+        sent.append(books)
+    monkeypatch.setattr(checker, "send_new_release_email", send)
+    db.save_settings({"email_enabled": "1"})
+    mock_api.state["include_new"] = True
+    checker.check_all()           # email fails; B004 stays pending
+    db.mark_seen("B004")          # user sees it on the dashboard
+    fail[0] = False
+    checker.check_all()
+    assert sent == [] and db.unnotified_books() == []
 
 
 def test_mark_seen_clears_book_on_all_watches(watched):
     mock_api.state["include_new"] = True
     checker.check_all()
     # seen is per book: clears the author AND series copies
-    db.mark_seen("B004", watched["author"])
+    db.mark_seen("B004")
     assert db.new_books(watched["series"]) == []
     assert db.new_books() == []
 

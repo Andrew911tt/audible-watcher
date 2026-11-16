@@ -7,6 +7,7 @@ No login or Audible credentials are required.
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 import requests
@@ -43,6 +44,11 @@ class AudibleAPIError(Exception):
     pass
 
 
+class AudibleUnavailable(AudibleAPIError):
+    """Audible couldn't be reached (network error, rate limit or server
+    error after retries) — as opposed to a bad request for one book."""
+
+
 def matches_language(book: dict, language: str | None) -> bool:
     """True if the book is in the given language. Books whose language the
     catalog doesn't state are kept (benefit of the doubt)."""
@@ -62,18 +68,66 @@ def _store_url(marketplace: str, asin: str) -> str:
     return f"https://www.audible.{tld}/pd/{asin}"
 
 
-def _get_json(url: str, params: dict) -> dict:
-    last_err = None
-    for attempt in range(3):
+RETRY_STATUS = {429, 500, 502, 503, 504}  # worth another try
+MAX_RETRY_AFTER = 60  # seconds; never stall a check longer than this
+
+
+def _retry_after(r) -> float | None:
+    """The server's Retry-After (in seconds), capped, if it sent one."""
+    try:
+        return min(max(float(r.headers.get("Retry-After", "")), 0),
+                   MAX_RETRY_AFTER)
+    except (TypeError, ValueError):
+        return None
+
+
+def _get_json(url: str, params: dict, attempts: int = 3) -> dict:
+    """GET and decode JSON. Network errors, rate limits (429) and server
+    errors (5xx) are retried with backoff, honouring Retry-After; other
+    HTTP errors (bad request, not found...) fail at once."""
+    last_err, transient = None, True
+    for attempt in range(attempts):
+        wait = 2 * (attempt + 1)
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=30)
-            if r.status_code == 200:
-                return r.json()
-            last_err = f"HTTP {r.status_code}"
+            # 10 s to connect (a dead network fails fast), 30 s to answer
+            r = requests.get(url, params=params, headers=HEADERS,
+                             timeout=(10, 30))
         except requests.RequestException as e:
             last_err = str(e)
-        time.sleep(2 * (attempt + 1))
-    raise AudibleAPIError(f"Audible API request failed: {last_err}")
+        else:
+            if r.status_code == 200:
+                try:
+                    return r.json()
+                except ValueError:
+                    raise AudibleAPIError(
+                        "Audible API returned a response that isn't JSON")
+            last_err = f"HTTP {r.status_code}"
+            if r.status_code not in RETRY_STATUS:
+                transient = False
+                break
+            wait = _retry_after(r) or wait
+        if attempt < attempts - 1:
+            time.sleep(wait)
+    error = AudibleUnavailable if transient else AudibleAPIError
+    raise error(f"Audible API request failed: {last_err}")
+
+
+def norm_name(name: str | None) -> str:
+    """Compare-friendly author name: 'J.R.R. Tolkien' == 'J. R. R. Tolkien'."""
+    return "".join(ch for ch in (name or "").lower() if ch.isalnum())
+
+
+def _credited_names(author_list: list[str]) -> set[str]:
+    """Normalised author credits, splitting co-author credits the catalog
+    sometimes lumps together ('Brandon Sanderson & Dan Wells'). Credits with
+    a role ('Larry Correia - foreword', 'X (Introduction)') stay as they are,
+    so a foreword or translation doesn't count as the author's own book."""
+    names = set()
+    for credit in author_list:
+        names.add(norm_name(credit))  # the credit as written, '&' and all
+        for part in re.split(r"\s+(?:&|and)\s+", credit):
+            names.add(norm_name(part))
+    return names
 
 
 def _get(marketplace: str, params: dict) -> dict:
@@ -99,6 +153,7 @@ def _simplify(product: dict, marketplace: str) -> dict:
         "title": product.get("title") or "",
         "subtitle": product.get("subtitle") or "",
         "authors": ", ".join(a for a in authors if a),
+        "author_list": [a for a in authors if a],  # names may contain commas
         "narrators": ", ".join(n for n in narrators if n),
         "series_title": series_title,
         "series_sequence": series_sequence,
@@ -117,8 +172,15 @@ def _simplify(product: dict, marketplace: str) -> dict:
 
 
 def search_by_author(name: str, marketplace: str = "us",
-                     max_results: int = 100) -> list[dict]:
-    """All titles credited to an author, newest first."""
+                     max_results: int = 100,
+                     strict: bool = False) -> list[dict]:
+    """Titles credited to an author, newest first.
+
+    Audible's author parameter matches loosely. strict=True (used for
+    watches) keeps only books credited to exactly this author, ignoring
+    case, spaces and punctuation — never someone else's books. Otherwise
+    (used for search) near matches are returned when there's no exact one.
+    """
     out, page = [], 0
     while len(out) < max_results:
         num = min(50, max_results - len(out))
@@ -133,6 +195,9 @@ def search_by_author(name: str, marketplace: str = "us",
         if len(products) < num:
             break
         page += 1
+    if strict:
+        target = norm_name(name)
+        return [b for b in out if target in _credited_names(b["author_list"])]
     # The author param does fuzzy matching; keep only exact-ish matches.
     name_lc = name.strip().lower()
     exact = [b for b in out
@@ -224,17 +289,23 @@ def books_in_series(series_title: str, series_asin: str | None,
     if not series_asin:
         try:
             series_asin = _resolve_series_asin(series_title, marketplace)
+        except AudibleUnavailable:
+            raise  # Audible is down: a fallback search would fail too
         except AudibleAPIError:
             series_asin = None
     if series_asin:
         try:
             child_asins = _series_child_asins(series_asin, marketplace)
             if child_asins:
-                books = _fetch_by_asins(child_asins[:max_results], marketplace)
+                # all of them: relationships can come in series order, so a
+                # cap could drop exactly the newest books of a long series
+                books = _fetch_by_asins(child_asins, marketplace)
                 # newest first; TBA pre-orders (no date yet) on top
                 books.sort(key=lambda b: b["release_date"] or "9999",
                            reverse=True)
                 return books
+        except AudibleUnavailable:
+            raise
         except AudibleAPIError:
             log.warning("Series relationship lookup failed for %s; "
                         "falling back to keyword search", series_asin)
@@ -284,5 +355,5 @@ def fetch_watch_books(watch_type: str, name: str, asin: str | None,
                       marketplace: str = "us") -> list[dict]:
     """Current Audible catalog entries for a watched author or series."""
     if watch_type == "author":
-        return search_by_author(name, marketplace)
+        return search_by_author(name, marketplace, strict=True)
     return books_in_series(name, asin, marketplace)
