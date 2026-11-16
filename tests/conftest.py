@@ -18,6 +18,11 @@ os.environ["AUDIBLE_WATCHER_DB"] = os.path.join(tempfile.mkdtemp(),
 import mock_api  # noqa: E402
 mock_api.install()
 
+# Never touch a real Audible login: a developer's own audible_auth.json may
+# sit next to app.py, and tests must not sync their library or rewrite it.
+import account  # noqa: E402
+account.AUTH_FILE = os.path.join(tempfile.mkdtemp(), "no-auth.json")
+
 import checker  # noqa: E402
 import db  # noqa: E402
 import app as webapp  # noqa: E402
@@ -30,6 +35,7 @@ from flask.testing import FlaskClient  # noqa: E402
 def fresh_db(tmp_path, monkeypatch):
     """A brand-new database and clean mock state for every test."""
     monkeypatch.setattr(db, "DB_PATH", str(tmp_path / "watcher.db"))
+    monkeypatch.setattr(account, "AUTH_FILE", str(tmp_path / "auth.json"))
     db.init_db()
     mock_api.state.update(include_new=False, include_foreign=False)
     # keep enrichment out of background threads and skip its throttle sleeps;

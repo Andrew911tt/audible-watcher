@@ -8,6 +8,10 @@
   <h1><span class="pill pill-{{ watch.type }}">{{ watch.type }}</span>
       {{ watch.name }}</h1>
   <div class="head-actions">
+    {% if audible_url %}
+    <a class="btn" href="{{ audible_url }}" target="_blank" rel="noopener"
+       title="Open this series in the Audible store">View on Audible ↗</a>
+    {% endif %}
     <form method="post"
           action="{{ url_for('hide_duplicates', watch_id=watch.id) }}">
       <button class="btn" type="submit"
@@ -56,7 +60,19 @@
       <span>{{ b.title }}
         {% if b.series_sequence %}(Book {{ b.series_sequence }}){% endif %}
         — 📅 {{ b.release_date or 'TBA' }}
-        {% if b.language %} · {{ b.language }}{% endif %}</span>
+        {% if b.language %} · {{ b.language }}{% endif %}
+        <span class="hidden-reason">
+        {%- if b.region_hidden -%}
+          · not sold in your Audible store
+          {%- if b.available_checked_at %} (checked {{ b.available_checked_at|localtime }}; checked again weekly){% endif %}
+        {%- elif b.store_hidden -%}
+          · edition from your previous Audible store
+        {%- elif b.language and settings_language and b.language|lower != settings_language -%}
+          · not in your language
+        {%- else -%}
+          · hidden by you or as a duplicate
+        {%- endif -%}
+        </span></span>
       <form method="post"
             action="{{ url_for('book_unhide', asin=b.asin, watch_id=b.watch_id) }}">
         <button class="btn btn-small" type="submit">Unhide</button>

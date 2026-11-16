@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- book links and covers must not tell Audible/Amazon this app's address -->
+  <meta name="referrer" content="no-referrer">
   <title>{% block title %}Audible Watcher{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   {% block head %}{% endblock %}
@@ -13,7 +15,6 @@
   <nav>
     <a href="{{ url_for('dashboard') }}">Dashboard</a>
     <a href="{{ url_for('search') }}">Add favorites</a>
-    <a href="{{ url_for('account_page') }}">Account</a>
     <a href="{{ url_for('settings_page') }}">Settings</a>
     {% if password_enabled and request.endpoint != 'login' %}
     <form method="post" action="{{ url_for('logout') }}" class="nav-form">

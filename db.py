@@ -13,7 +13,7 @@ import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from paths import DATA_DIR
 
@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS watches (
     last_checked_at TEXT,
     last_error      TEXT,
     baselined_at    TEXT,  -- first successful fetch; NULL = not done yet
+    fetch_rev       INTEGER NOT NULL DEFAULT 0,  -- see FETCH_REVISION
     UNIQUE (type, name)
 );
 
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS books (
     language        TEXT,
     published_date  TEXT,
     available       INTEGER,  -- sold in our marketplace? NULL = unchecked
+    available_checked_at TEXT,  -- when that was last asked
     image_url       TEXT,
     url             TEXT
 );
@@ -63,6 +65,10 @@ CREATE TABLE IF NOT EXISTS watch_books (
     is_new        INTEGER NOT NULL DEFAULT 0,
     notified      INTEGER NOT NULL DEFAULT 0,
     hidden        INTEGER NOT NULL DEFAULT 0,
+    store_hidden  INTEGER NOT NULL DEFAULT 0,  -- hidden as another store's
+                                               -- edition (marketplace change)
+    region_hidden INTEGER NOT NULL DEFAULT 0,  -- hidden as not sold in this
+                                               -- store; re-checked weekly
     PRIMARY KEY (asin, watch_id)
 );
 
@@ -176,6 +182,26 @@ def init_db():
             c.execute("ALTER TABLE books ADD COLUMN all_series TEXT")
         watch_cols = {r["name"]
                       for r in c.execute("PRAGMA table_info(watches)")}
+        link_cols = {r["name"]
+                     for r in c.execute("PRAGMA table_info(watch_books)")}
+        if "store_hidden" not in link_cols:
+            c.execute("ALTER TABLE watch_books ADD COLUMN store_hidden "
+                      "INTEGER NOT NULL DEFAULT 0")
+        if "region_hidden" not in link_cols:
+            c.execute("ALTER TABLE watch_books ADD COLUMN region_hidden "
+                      "INTEGER NOT NULL DEFAULT 0")
+            # earlier versions hid "not sold here" books without saying why;
+            # mark them so the weekly re-check can bring them back
+            c.execute("""
+                UPDATE watch_books SET region_hidden = 1
+                WHERE hidden = 1 AND store_hidden = 0
+                  AND asin IN (SELECT asin FROM books WHERE available = 0)""")
+        book_cols = {r["name"] for r in c.execute("PRAGMA table_info(books)")}
+        if "available_checked_at" not in book_cols:
+            c.execute("ALTER TABLE books ADD COLUMN available_checked_at TEXT")
+        if "fetch_rev" not in watch_cols:
+            c.execute("ALTER TABLE watches ADD COLUMN fetch_rev "
+                      "INTEGER NOT NULL DEFAULT 0")
         if "baselined_at" not in watch_cols:
             c.execute("ALTER TABLE watches ADD COLUMN baselined_at TEXT")
             # watches from older versions that already have books were
@@ -278,6 +304,12 @@ def get_watch(watch_id: int) -> dict | None:
     return dict(r) if r else None
 
 
+def set_fetch_rev(watch_id: int, rev: int):
+    with conn() as c:
+        c.execute("UPDATE watches SET fetch_rev = ? WHERE id = ?",
+                  (rev, watch_id))
+
+
 def mark_baselined(watch_id: int):
     with conn() as c:
         c.execute("UPDATE watches SET baselined_at = ? WHERE id = ?",
@@ -292,9 +324,40 @@ def reset_for_marketplace_change():
     with conn() as c:
         c.execute("UPDATE watches SET baselined_at = NULL")
         c.execute("""
-            UPDATE watch_books SET hidden = 0, is_new = 0, notified = 1
-            WHERE asin IN (SELECT asin FROM books WHERE available = 0)""")
-        c.execute("UPDATE books SET available = NULL")
+            UPDATE watch_books SET hidden = 0, store_hidden = 0,
+                                   region_hidden = 0, is_new = 0, notified = 1
+            WHERE store_hidden = 1 OR region_hidden = 1""")
+        c.execute("UPDATE books SET available = NULL, "
+                  "available_checked_at = NULL")
+
+
+def set_watch_asin(watch_id: int, asin: str | None):
+    with conn() as c:
+        c.execute("UPDATE watches SET asin = ? WHERE id = ?", (asin, watch_id))
+
+
+def find_watch(wtype: str, name: str) -> int | None:
+    """The id of an existing watch (name compared ignoring case), or None."""
+    with conn() as c:
+        r = c.execute("SELECT id FROM watches WHERE type = ? "
+                      "AND lower(trim(name)) = lower(trim(?))",
+                      (wtype, name)).fetchone()
+    return r["id"] if r else None
+
+
+def hide_other_store_links(watch_id: int, prefix: str) -> int:
+    """After a marketplace change, hide this watch's books that link to
+    another store (they weren't in the new store's results). Marked
+    store_hidden so switching back brings them back."""
+    with conn() as c:
+        cur = c.execute("""
+            UPDATE watch_books SET hidden = 1, store_hidden = 1, is_new = 0,
+                                   notified = 1
+            WHERE watch_id = ? AND hidden = 0
+              AND asin IN (SELECT asin FROM books
+                           WHERE url IS NOT NULL AND url NOT LIKE ? || '%')""",
+            (watch_id, prefix))
+        return cur.rowcount
 
 
 def mark_watch_checked(watch_id: int, error: str | None = None):
@@ -414,7 +477,8 @@ def hide_books(watch_id: int, asins: list[str]):
 
 def books_for_watch(watch_id: int, include_hidden: bool = False) -> list[dict]:
     q = ("SELECT b.*, wb.watch_id, wb.discovered_at, wb.is_new, "
-         "wb.notified, wb.hidden, w.name AS watch_name, "
+         "wb.notified, wb.hidden, wb.store_hidden, wb.region_hidden, "
+         "w.name AS watch_name, "
          "w.type AS watch_type, w.asin AS watch_asin "
          "FROM books b JOIN watch_books wb ON wb.asin = b.asin "
          "JOIN watches w ON w.id = wb.watch_id "
@@ -508,15 +572,65 @@ def books_missing_availability(limit: int = 50) -> list[dict]:
 
 def set_availability(asin: str, available: bool):
     with conn() as c:
-        c.execute("UPDATE books SET available = ? WHERE asin = ?",
-                  (1 if available else 0, asin))
+        c.execute("UPDATE books SET available = ?, available_checked_at = ? "
+                  "WHERE asin = ?", (1 if available else 0, now_iso(), asin))
+
+
+REGION_RECHECK_DAYS = 7
+
+
+def books_to_recheck(limit: int = 20) -> list[dict]:
+    """Books hidden as "not sold in this store" that are due another look
+    (weekly, oldest check first). Stores add editions over time, and the
+    store search can simply miss a book, so "no" is never final."""
+    cutoff = (datetime.now(timezone.utc)
+              - timedelta(days=REGION_RECHECK_DAYS)).strftime(
+                  "%Y-%m-%dT%H:%M:%SZ")
+    with conn() as c:
+        rows = c.execute("""
+            SELECT b.asin, b.title, b.authors FROM books b
+            WHERE b.available = 0
+              AND (b.available_checked_at IS NULL
+                   OR b.available_checked_at < ?)
+              AND EXISTS (SELECT 1 FROM watch_books wb
+                          WHERE wb.asin = b.asin AND wb.region_hidden = 1)
+            ORDER BY b.available_checked_at IS NOT NULL,
+                     b.available_checked_at
+            LIMIT ?""", (cutoff, limit)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_availability_checked(asin: str):
+    with conn() as c:
+        c.execute("UPDATE books SET available_checked_at = ? WHERE asin = ?",
+                  (now_iso(), asin))
+
+
+def restore_now_available(asin: str) -> int:
+    """A book hidden as "not sold here" is sold here now: bring it back on
+    the watches it was auto-hidden from, as a new book (it's new to you),
+    so it shows on the dashboard and goes out in the next email. Links you
+    hid yourself stay hidden."""
+    with conn() as c:
+        c.execute("UPDATE books SET available = 1, available_checked_at = ? "
+                  "WHERE asin = ?", (now_iso(), asin))
+        cur = c.execute("""
+            UPDATE watch_books SET hidden = 0, region_hidden = 0, is_new = 1,
+                                   notified = 0
+            WHERE asin = ? AND region_hidden = 1""", (asin,))
+        return cur.rowcount
 
 
 def hide_asin_everywhere(asin: str):
     """Hide a book on every watch (e.g. an edition not sold in this
-    marketplace). Runs once per book — a manual unhide is respected."""
+    marketplace). Only visible links are touched and they're marked
+    region_hidden, so the weekly re-check can bring them back; a link you
+    unhid yourself is never re-hidden (the book is only judged once until
+    then)."""
     with conn() as c:
-        c.execute(_HIDE + "asin = ?", (asin,))
+        c.execute("UPDATE watch_books SET hidden = 1, region_hidden = 1, "
+                  "is_new = 0, notified = 1 WHERE asin = ? AND hidden = 0",
+                  (asin,))
 
 
 def series_sizes() -> dict[str, int]:
@@ -582,11 +696,17 @@ def set_book_hidden(asin: str, watch_id: int, hidden: bool):
     """Hide/unhide a catalog entry. The link row is kept (not deleted) so the
     next Audible check doesn't re-import it and flag it as a new release."""
     with conn() as c:
+        # your choice replaces any automatic reason, so the re-checks
+        # never undo it (a book you hid stays hidden; one you unhid stays)
         if hidden:
             c.execute(_HIDE + "asin = ? AND watch_id = ?", (asin, watch_id))
+            c.execute("UPDATE watch_books SET region_hidden = 0, "
+                      "store_hidden = 0 WHERE asin = ? AND watch_id = ?",
+                      (asin, watch_id))
         else:
-            c.execute("UPDATE watch_books SET hidden = 0 "
-                      "WHERE asin = ? AND watch_id = ?", (asin, watch_id))
+            c.execute("UPDATE watch_books SET hidden = 0, region_hidden = 0, "
+                      "store_hidden = 0 WHERE asin = ? AND watch_id = ?",
+                      (asin, watch_id))
 
 
 def hide_duplicate_books(watch_id: int) -> int:
@@ -646,12 +766,20 @@ def replace_owned(rows: list[dict]):
 
 
 def owned_books_list() -> list[dict]:
-    """The synced library, most recent purchases first."""
+    """The synced library: pre-orders that haven't come out yet first
+    (soonest release first, undated last), then most recent purchases
+    first. A pre-order that's already out is listed like any purchase."""
+    today = date.today().isoformat()
     with conn() as c:
-        rows = c.execute(
-            "SELECT * FROM owned_books WHERE title IS NOT NULL "
-            "ORDER BY (purchase_date IS NULL), purchase_date DESC, "
-            "title COLLATE NOCASE").fetchall()
+        rows = c.execute("""
+            SELECT *, (preordered = 1 AND (release_date IS NULL
+                                           OR release_date > ?)) AS upcoming
+            FROM owned_books WHERE title IS NOT NULL
+            ORDER BY upcoming DESC,
+                     CASE WHEN upcoming THEN (release_date IS NULL) END,
+                     CASE WHEN upcoming THEN release_date END,
+                     (purchase_date IS NULL), purchase_date DESC,
+                     title COLLATE NOCASE""", (today,)).fetchall()
     return [dict(r) for r in rows]
 
 

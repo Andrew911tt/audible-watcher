@@ -36,10 +36,18 @@ def test_post_without_csrf_token_is_rejected(raw_client):
     before = db.get_settings()["smtp_host"]
     resp = raw_client.post("/settings", data={"check_hour": "8",
                                               "smtp_host": "evil.example"})
-    assert resp.status_code == 400
+    # refused: nothing changes; the browser is sent back with a note
+    assert resp.status_code == 302
     assert db.get_settings()["smtp_host"] == before
-    assert raw_client.post("/test-email").status_code == 400
-    assert raw_client.post("/seen-all").status_code == 400
+    sent = []
+    import checker
+    checker_send = checker.send_test_email
+    checker.send_test_email = lambda s: sent.append(s)
+    try:
+        assert raw_client.post("/test-email").status_code == 302
+    finally:
+        checker.send_test_email = checker_send
+    assert sent == []
 
 
 def test_fetch_post_without_csrf_token_gets_json_error(raw_client):
@@ -51,9 +59,20 @@ def test_fetch_post_without_csrf_token_gets_json_error(raw_client):
     assert db.list_watches() == []
 
 
-def test_wrong_csrf_token_is_rejected(client):
-    resp = client.post("/seen-all", data={"csrf_token": "forged"})
-    assert resp.status_code == 400
+def test_wrong_csrf_token_is_rejected(client, watched):
+    mock_api.state["include_new"] = True
+    checker.check_all()
+    resp = client.post("/seen-all", data={"csrf_token": "forged"},
+                       follow_redirects=True)
+    assert "Nothing was" in resp.get_data(as_text=True)
+    assert db.new_books(), "the forged 'mark all seen' must not apply"
+
+
+def test_refused_post_never_redirects_offsite(raw_client):
+    resp = raw_client.post("/seen-all",
+                           headers={"Referer": "https://evil.example/x"})
+    assert resp.status_code == 302
+    assert "evil.example" not in resp.location
 
 
 def test_changing_smtp_server_requires_password_again(client):
@@ -81,7 +100,7 @@ def test_every_post_form_carries_a_csrf_token(client, watched):
     checker.check_all()  # NEW books -> "Mark seen" forms
     pages = ["/", "/?tab=series", "/?tab=preorders", "/?tab=library",
              "/?tab=library&view=author", "/search?q=Test+Author",
-             "/search?q=Great+Series", "/settings", "/account"]
+             "/search?q=Great+Series", "/settings"]
     pages += [f"/watch/{w['id']}" for w in db.list_watches()]
     for p in pages:
         html = client.get(p).get_data(as_text=True)

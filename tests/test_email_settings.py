@@ -59,3 +59,29 @@ def test_explain_smtp_error_hints():
     assert "server name" in checker.explain_smtp_error(
         socket.gaierror("Name or service not known"))
     assert checker.explain_smtp_error(ValueError("odd")) == "odd"
+
+
+def test_settings_page_is_one_set_of_cards(client):
+    html = client.get("/settings").get_data(as_text=True)
+    main = html[html.index("<main>"):]
+    titles = [main[i + len('class="panel-title">'):main.index("<", i + 20)]
+              for i in range(len(main)) if main.startswith('class="panel-title">', i)]
+    assert titles == ["Audible account", "Monitoring", "Email notifications",
+                      "Access from other devices"]
+    assert "<fieldset" not in main
+    email = main[main.index('id="email"'):main.index('class="save-bar"')]
+    assert 'formaction="/test-email"' in email          # test button inside
+    assert "Troubleshooting" in email
+    # Enter saves: the form's first submit button is Save, not the test email
+    form = main[main.index('class="settings-form"'):]
+    first = form[form.index("<button"):form.index("</button>")]
+    assert "Save settings" in first and "formaction" not in first
+
+
+def test_test_email_button_posts_from_the_settings_form(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(checker, "send_test_email", lambda s: sent.append(s))
+    resp = client.post("/test-email", data={"smtp_host": "ignored",
+                                            "check_hour": "8"})
+    assert resp.status_code == 302 and len(sent) == 1
+    assert sent[0]["smtp_host"] == db.get_settings()["smtp_host"]  # saved ones

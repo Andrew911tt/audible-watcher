@@ -8,9 +8,10 @@ import socket
 import ssl
 import threading
 import time
+from datetime import date, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
-from email.utils import formatdate, make_msgid
+from email.utils import formatdate, make_msgid, parseaddr
 
 import audible_api
 import bookinfo
@@ -49,7 +50,7 @@ def verify_market_availability(limit: int = 50):
     include foreign-region editions like UK printings)."""
     marketplace = db.get_settings().get("marketplace", "us")
     for r in db.books_missing_availability(limit):
-        author = (r["authors"] or "").split(",")[0].strip() or None
+        author = audible_api.first_author(r["authors"])
         try:
             ok = audible_api.check_market_availability(
                 r["asin"], r["title"], author, marketplace)
@@ -72,7 +73,7 @@ def enrich_published_dates(limit: int = 20):
     one yet — a bounded, throttled batch per run so checks stay fast and the
     sources aren't hammered."""
     for r in db.books_missing_published(limit):
-        author = (r["authors"] or "").split(",")[0].strip() or None
+        author = audible_api.first_author(r["authors"])
         try:
             pd, definitive = bookinfo.published_date(r["title"], author)
         except bookinfo.RateLimited:
@@ -125,7 +126,7 @@ def _sold_here(pending: list[dict], marketplace: str) -> list[dict]:
         elif not b.get("release_date") or api_down:
             verdict[asin] = False  # hold until it can be verified
         else:
-            author = (b.get("authors") or "").split(",")[0].strip() or None
+            author = audible_api.first_author(b.get("authors"))
             try:
                 ok = audible_api.check_market_availability(
                     asin, b["title"], author, marketplace)
@@ -151,16 +152,65 @@ def _sold_here(pending: list[dict], marketplace: str) -> list[dict]:
     return [b for b in pending if verdict[b["asin"]]]
 
 
+def recheck_not_sold_here(marketplace: str, limit: int = 20) -> int:
+    """Ask the store again about books hidden as "not sold here" (each about
+    once a week, a small batch per check). One that's sold here now comes
+    back as a new book, so it's flagged and emailed. Returns how many."""
+    restored = 0
+    for r in db.books_to_recheck(limit):
+        try:
+            ok = audible_api.check_market_availability(
+                r["asin"], r["title"], audible_api.first_author(r["authors"]),
+                marketplace)
+        except audible_api.AudibleAPIError:
+            log.info("Store re-check unavailable — trying again next check")
+            break
+        if ok:
+            n = db.restore_now_available(r["asin"])
+            restored += 1
+            log.info("%r (%s) is sold in this store now — back on %d "
+                     "watch(es) as new", r["title"], r["asin"], n)
+        else:
+            db.mark_availability_checked(r["asin"])
+        time.sleep(0.3)  # be polite
+    return restored
+
+
 def _empty_note(watch: dict, books: list) -> str | None:
-    """A warning for the watch list when an author watch finds nothing —
-    usually a name that doesn't exactly match how Audible credits them."""
-    if watch["type"] == "author" and not books:
+    """A warning for the watch list when a watch finds nothing: usually an
+    author name that doesn't exactly match how Audible credits them, or a
+    series your Audible store doesn't carry."""
+    if books:
+        return None
+    if watch["type"] == "author":
         return ("Audible lists no titles credited to exactly this name. "
                 "Check the spelling, or re-add the author from a search.")
-    return None
+    return ("Audible found no books for this series in your store. If you "
+            "changed marketplace, try removing it and adding it again from "
+            "a search.")
 
 
 MAX_UNREACHABLE = 3  # watches in a row Audible can't be reached for
+RECENT_DAYS = 30     # see _split_recent
+BULK_EMAIL_LIMIT = 10  # new books from one watch listed one by one in email
+
+
+def _split_recent(books: list[dict], last_checked: str | None):
+    """(recent, older) for a watch's first check after an app update that
+    changed what's fetched. Older titles only showed up because the app
+    now looks further; recent ones (released since about the last check,
+    upcoming, or undated) may be real new releases and still alert."""
+    ref = (last_checked or "")[:10] or date.today().isoformat()
+    try:
+        since = (date.fromisoformat(ref)
+                 - timedelta(days=RECENT_DAYS)).isoformat()
+    except ValueError:
+        since = (date.today() - timedelta(days=RECENT_DAYS)).isoformat()
+    recent = [b for b in books
+              if not b.get("release_date") or b["release_date"] >= since]
+    older = [b for b in books
+             if b.get("release_date") and b["release_date"] < since]
+    return recent, older
 
 
 def _update_watch(w: dict, settings: dict) -> list[dict]:
@@ -171,16 +221,79 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
     baseline — already seen, never emailed — instead of all of it being
     flagged as new releases.
     """
+    marketplace = settings.get("marketplace", "us")
+    first_fetch = not w.get("baselined_at")
+    if first_fetch and w["type"] == "series":
+        # each Audible store has its own series IDs: after a marketplace
+        # change the stored one finds nothing, so look it up in this store
+        try:
+            asin = audible_api.resolve_series_asin(w["name"], marketplace)
+        except audible_api.AudibleUnavailable:
+            raise
+        except audible_api.AudibleAPIError:
+            asin = None
+        if asin and asin != w.get("asin"):
+            log.info("Series %r is %s in this store", w["name"], asin)
+            db.set_watch_asin(w["id"], asin)
+            w = dict(w, asin=asin)
     books = audible_api.fetch_watch_books(
-        w["type"], w["name"], w["asin"], settings.get("marketplace", "us"))
+        w["type"], w["name"], w["asin"], marketplace)
     keep, foreign = _split_by_language(books, settings)
     _store_foreign(w["id"], foreign)
-    first_fetch = not w.get("baselined_at")
-    fresh = db.upsert_books(w["id"], keep, as_new=not first_fetch)
+    updated_fetch = (not first_fetch and (w.get("fetch_rev") or 0)
+                     < audible_api.FETCH_REVISION)
+    if first_fetch:
+        fresh = db.upsert_books(w["id"], keep, as_new=False)
+    elif updated_fetch:
+        recent, older = _split_recent(keep, w.get("last_checked_at"))
+        quiet = db.upsert_books(w["id"], older, as_new=False)
+        fresh = db.upsert_books(w["id"], recent, as_new=True)
+        if quiet:
+            log.info("Watch %r: %d older title(s) found by the updated "
+                     "fetch were recorded quietly", w["name"], len(quiet))
+    else:
+        fresh = db.upsert_books(w["id"], keep, as_new=True)
+    db.set_fetch_rev(w["id"], audible_api.FETCH_REVISION)
     if first_fetch:
         db.mark_baselined(w["id"])
+        if books:  # leave nothing from the previous store on the page
+            db.hide_other_store_links(w["id"],
+                                      audible_api.store_prefix(marketplace))
+        if w["type"] == "series" and not w.get("book_count"):
+            # added while Audible was unreachable: its author watch couldn't
+            # be added then. (Not after a marketplace change: an author
+            # watch you removed on purpose stays removed.)
+            ensure_series_author(w["id"])
     db.mark_watch_checked(w["id"], _empty_note(w, books))
     return [] if first_fetch else fresh
+
+
+def _primary_author(watch_id: int) -> str | None:
+    """Most common author name among a watch's visible books."""
+    counts: dict[str, int] = {}
+    for b in db.books_for_watch(watch_id):
+        for name in audible_api.split_authors(b["authors"]):
+            counts[name] = counts.get(name, 0) + 1
+    return max(counts, key=counts.get) if counts else None
+
+
+def ensure_series_author(series_watch_id: int) -> tuple[str, int] | None:
+    """Watching a series also watches its main author. Returns (author,
+    books found) when a new author watch was added, else None. Runs when
+    the series is added, and again on its first successful fetch in case
+    Audible was unreachable when it was added."""
+    author = _primary_author(series_watch_id)
+    if not author:
+        return None
+    if db.find_watch("author", author) is not None:
+        return None
+    author_id = db.add_watch("author", author, None)
+    try:
+        return author, baseline_watch(author_id)
+    except Exception:  # noqa: BLE001 - the next check records it quietly
+        # (its baseline is still pending, so nothing gets flagged as new)
+        log.info("Added author watch %r; its first fetch is pending", author)
+        return author, 0
 
 
 def check_all(trigger: str = "manual") -> dict:
@@ -214,16 +327,22 @@ def check_all(trigger: str = "manual") -> dict:
             db.mark_watch_checked(w["id"], str(e))
             if isinstance(e, audible_api.AudibleUnavailable):
                 unreachable += 1
-                if unreachable >= MAX_UNREACHABLE and i + 1 < len(watches):
+                # 3 in a row (or every watch, if there are fewer): Audible
+                # is down, so stop and let the caller retry later
+                if unreachable >= min(MAX_UNREACHABLE, len(watches)):
                     skipped = len(watches) - i - 1
                     errors.append(
-                        f"Audible is unreachable — skipped the other "
-                        f"{skipped} watch(es); will try again later")
+                        "Audible is unreachable"
+                        + (f" — skipped the other {skipped} watch(es)"
+                           if skipped else "")
+                        + "; will try again later")
                     aborted = True
                     break
             else:
                 unreachable = 0
 
+    if not aborted:
+        recheck_not_sold_here(marketplace)
     background_enrichment_async()
 
     email_sent = False
@@ -241,7 +360,8 @@ def check_all(trigger: str = "manual") -> dict:
         ready = _sold_here(pending, marketplace)
         if ready:
             try:
-                send_new_release_email(db.dedupe_by_asin(ready), settings)
+                send_new_release_email(
+                    _collapse_bulk(db.dedupe_by_asin(ready)), settings)
                 db.mark_notified([(b["asin"], b["watch_id"]) for b in ready])
                 email_sent = True
             except Exception as e:  # noqa: BLE001
@@ -251,6 +371,24 @@ def check_all(trigger: str = "manual") -> dict:
     db.log_check(trigger, total_new, "; ".join(errors) or None, email_sent)
     return {"new_books": total_new, "errors": errors, "email_sent": email_sent,
             "aborted": aborted}
+
+
+def _collapse_bulk(books: list[dict]) -> list[dict]:
+    """Safety net: if one watch has more than BULK_EMAIL_LIMIT new books in
+    a single email, list it as one summary line instead (they're all on the
+    dashboard). A real author or series rarely releases that many at once;
+    a burst usually means Audible re-listed a back catalogue."""
+    per_watch: dict = {}
+    for b in books:
+        per_watch.setdefault((b["watch_type"], b["watch_name"]), []).append(b)
+    out, summaries = [], []
+    for (wtype, wname), group in per_watch.items():
+        if len(group) > BULK_EMAIL_LIMIT:
+            summaries.append({"bulk_count": len(group), "watch_name": wname,
+                              "watch_type": wtype})
+        else:
+            out.extend(group)
+    return out + summaries
 
 
 def baseline_watch(watch_id: int) -> int:
@@ -265,6 +403,7 @@ def baseline_watch(watch_id: int) -> int:
     _store_foreign(watch_id, foreign)
     inserted = db.upsert_books(watch_id, keep, as_new=False)
     db.mark_baselined(watch_id)
+    db.set_fetch_rev(watch_id, audible_api.FETCH_REVISION)
     db.mark_watch_checked(watch_id, _empty_note(w, books))
     background_enrichment_async()
     return len(inserted)
@@ -276,6 +415,16 @@ def _book_row_html(b: dict) -> str:
     # every value is escaped: titles like "Q&A" or "<Untitled>" must not
     # break the email's HTML
     e = html.escape
+    if b.get("bulk_count"):
+        return f"""
+    <tr>
+      <td></td>
+      <td style="padding:10px 0">
+        <strong>{e(b['watch_name'])}</strong>: {b['bulk_count']} titles
+        were added to Audible at once — they're listed on your Audible
+        Watcher dashboard.
+      </td>
+    </tr>"""
     seq = (f" (Book {e(str(b['series_sequence']))})"
            if b.get("series_sequence") else "")
     series = (f"<br><em>{e(b['series_title'])}{seq}</em>"
@@ -299,7 +448,7 @@ def _book_row_html(b: dict) -> str:
 
 
 def build_email(books: list[dict]) -> tuple[str, str, str]:
-    n = len(books)
+    n = sum(b.get("bulk_count", 1) for b in books)
     subject = (f"Audible Watcher: {n} new book{'s' if n != 1 else ''} "
                "from your favorites")
     rows = "\n".join(_book_row_html(b) for b in books)
@@ -314,6 +463,10 @@ def build_email(books: list[dict]) -> tuple[str, str, str]:
     </body></html>"""
     text_lines = [f"{n} new Audible title(s) from your favorites:", ""]
     for b in books:
+        if b.get("bulk_count"):
+            text_lines.append(f"- {b['watch_name']}: {b['bulk_count']} titles "
+                              "added to Audible at once — see the dashboard")
+            continue
         text_lines.append(f"- {b['title']} by {b.get('authors') or 'Unknown'}"
                           f" — releases {b.get('release_date') or 'TBA'}")
         text_lines.append(f"  {b['url']}")
@@ -337,8 +490,9 @@ def send_email(subject: str, html: str, text: str, settings: dict):
     msg["From"] = sender
     msg["To"] = ", ".join(recipients)
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain=(sender.rpartition("@")[2]
-                                           or None))
+    # domain of the address itself: From may be "Name <me@example.com>"
+    address = parseaddr(sender)[1]
+    msg["Message-ID"] = make_msgid(domain=address.rpartition("@")[2] or None)
     msg.attach(MIMEText(text, "plain"))
     msg.attach(MIMEText(html, "html"))
 

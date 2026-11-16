@@ -28,11 +28,17 @@ that appears later counts as new.</p>
           {% if r.sample %}— latest: “{{ r.sample.title }}”
           ({{ r.sample.release_date or 'TBA' }}){% endif %}</div>
       </div>
+      {% set wid = watch_id_for('author', r.name) %}
+      {% if wid %}
+      <a class="btn btn-small btn-watching"
+         href="{{ url_for('watch_detail', watch_id=wid) }}">Watching ✓</a>
+      {% else %}
       <form method="post" action="{{ url_for('add_watch') }}">
         <input type="hidden" name="type" value="author">
         <input type="hidden" name="name" value="{{ r.name }}">
         <button class="btn btn-primary btn-small" type="submit">Watch author</button>
       {{ csrf_field() }}</form>
+      {% endif %}
     </div>
     {% endfor %}
   </div>
@@ -47,14 +53,22 @@ that appears later counts as new.</p>
       <div>
         <strong>{{ s.series_title }}</strong>
         <div class="muted small">{{ s.count }} title(s) in search results
-          — e.g. by {{ s.sample_authors }}</div>
+          — e.g. by {{ s.sample_authors }}
+          · <a href="{{ audible_series_url(s.series_asin, s.series_title) }}"
+               target="_blank" rel="noopener">Audible ↗</a></div>
       </div>
+      {% set wid = watch_id_for('series', s.series_title) %}
+      {% if wid %}
+      <a class="btn btn-small btn-watching"
+         href="{{ url_for('watch_detail', watch_id=wid) }}">Watching ✓</a>
+      {% else %}
       <form method="post" action="{{ url_for('add_watch') }}">
         <input type="hidden" name="type" value="series">
         <input type="hidden" name="name" value="{{ s.series_title }}">
         <input type="hidden" name="asin" value="{{ s.series_asin }}">
         <button class="btn btn-primary btn-small" type="submit">Watch series</button>
       {{ csrf_field() }}</form>
+      {% endif %}
     </div>
     {% endfor %}
   </div>

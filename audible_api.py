@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from urllib.parse import urlencode
 
 import requests
 
@@ -66,6 +67,22 @@ def _base_url(marketplace: str) -> str:
 def _store_url(marketplace: str, asin: str) -> str:
     tld = MARKETPLACES.get(marketplace, "com")
     return f"https://www.audible.{tld}/pd/{asin}"
+
+
+def series_page_url(marketplace: str, series_asin: str | None,
+                    series_title: str = "") -> str:
+    """The series' page in the Audible store (by ID, which Audible
+    redirects to the full page), or a store search when the ID is unknown."""
+    tld = MARKETPLACES.get(marketplace, "com")
+    if series_asin:
+        return f"https://www.audible.{tld}/series/{series_asin}"
+    return (f"https://www.audible.{tld}/search?"
+            + urlencode({"keywords": series_title}))
+
+
+def store_prefix(marketplace: str) -> str:
+    """Start of every book link in this marketplace's store."""
+    return _store_url(marketplace, "")
 
 
 RETRY_STATUS = {429, 500, 502, 503, 504}  # worth another try
@@ -130,6 +147,40 @@ def _credited_names(author_list: list[str]) -> set[str]:
     return names
 
 
+_NAME_SUFFIX = re.compile(
+    r"^(jr|sr|ii|iii|iv|v|phd|md|esq|ret|obe|mbe|cbe)\.?$", re.IGNORECASE)
+
+
+def split_authors(authors: str | None) -> list[str]:
+    """Split a stored "A, B, C" author string back into names, keeping
+    suffixes with their name: "Martin Luther King, Jr., Coretta Scott King"
+    -> ["Martin Luther King, Jr.", "Coretta Scott King"]."""
+    names: list[str] = []
+    for part in (authors or "").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if names and _NAME_SUFFIX.match(part):
+            names[-1] = f"{names[-1]}, {part}"
+        else:
+            names.append(part)
+    return names
+
+
+_ROLE_CREDIT = re.compile(r"\s[-–—]\s|\(")
+
+
+def is_role_credit(name: str) -> bool:
+    """A credit with a role attached, like "Larry Correia - foreword" or
+    "Matt Dinniman (Introduction By)", rather than an author's own name."""
+    return bool(_ROLE_CREDIT.search(name or ""))
+
+
+def first_author(authors: str | None) -> str | None:
+    names = split_authors(authors)
+    return names[0] if names else None
+
+
 def _get(marketplace: str, params: dict) -> dict:
     params = dict(params)
     params.setdefault("response_groups", RESPONSE_GROUPS)
@@ -171,10 +222,30 @@ def _simplify(product: dict, marketplace: str) -> dict:
     }
 
 
+NEWEST_FIRST = "-ReleaseDate"
+# An author watch fetches all of the author's titles. The cap only stops a
+# runaway fuzzy match (Stephen King, the biggest so far, is ~400 titles in
+# all languages: 8 requests).
+WATCH_FETCH_LIMIT = 1000
+
+# Bump this whenever a change makes watches fetch more or different titles
+# (a bigger window, a different search). Each watch remembers the revision
+# it last ran with; on its first check under a new one, titles that only
+# turned up because of the change are recorded quietly instead of flagged
+# as new releases. History: 1 = up to 1.0.2 (newest 100 per author);
+# 2 = all of an author's titles.
+FETCH_REVISION = 2
+
+
 def search_by_author(name: str, marketplace: str = "us",
                      max_results: int = 100,
-                     strict: bool = False) -> list[dict]:
-    """Titles credited to an author, newest first.
+                     strict: bool = False,
+                     sort: str | None = NEWEST_FIRST) -> list[dict]:
+    """Titles credited to an author, newest first by default.
+
+    sort=None uses Audible's relevance order: right for finding an author
+    (the newest products of a translated author are mostly translations),
+    wrong for watching one (new releases must be in the window).
 
     Audible's author parameter matches loosely. strict=True (used for
     watches) keeps only books credited to exactly this author, ignoring
@@ -184,12 +255,10 @@ def search_by_author(name: str, marketplace: str = "us",
     out, page = [], 0
     while len(out) < max_results:
         num = min(50, max_results - len(out))
-        data = _get(marketplace, {
-            "author": name,
-            "num_results": num,
-            "page": page,
-            "products_sort_by": "-ReleaseDate",
-        })
+        params = {"author": name, "num_results": num, "page": page}
+        if sort:
+            params["products_sort_by"] = sort
+        data = _get(marketplace, params)
         products = data.get("products") or []
         out.extend(_simplify(p, marketplace) for p in products)
         if len(products) < num:
@@ -207,10 +276,12 @@ def search_by_author(name: str, marketplace: str = "us",
 
 def search_by_keywords(keywords: str, marketplace: str = "us",
                        max_results: int = 50) -> list[dict]:
+    """Products matching keywords in Audible's relevance order. (Newest-first
+    buried popular series under recent translations and look-alikes:
+    "Dungeon Crawler Carl" and "Harry Potter" weren't found at all.)"""
     data = _get(marketplace, {
         "keywords": keywords,
         "num_results": min(50, max_results),
-        "products_sort_by": "-ReleaseDate",
     })
     return [_simplify(p, marketplace) for p in (data.get("products") or [])]
 
@@ -267,6 +338,11 @@ def _fetch_by_asins(asins: list[str], marketplace: str = "us") -> list[dict]:
         out.extend(_simplify(p, marketplace)
                    for p in (data.get("products") or []))
     return out
+
+
+def resolve_series_asin(series_title: str, marketplace: str = "us") -> str | None:
+    """This store's ID for a series, found by its exact title."""
+    return _resolve_series_asin(series_title, marketplace)
 
 
 def _resolve_series_asin(series_title: str, marketplace: str = "us") -> str | None:
@@ -355,5 +431,8 @@ def fetch_watch_books(watch_type: str, name: str, asin: str | None,
                       marketplace: str = "us") -> list[dict]:
     """Current Audible catalog entries for a watched author or series."""
     if watch_type == "author":
-        return search_by_author(name, marketplace, strict=True)
+        # newest first, and all of them: heavily translated authors still
+        # show their whole own-language back catalogue
+        return search_by_author(name, marketplace, strict=True,
+                                max_results=WATCH_FETCH_LIMIT)
     return books_in_series(name, asin, marketplace)

@@ -15,6 +15,7 @@ import secrets
 import threading
 import time
 from datetime import date, datetime, timedelta, timezone
+from urllib.parse import urlsplit
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -27,7 +28,7 @@ import account
 import audible_api
 import checker
 import db
-from paths import RESOURCE_DIR
+from paths import RESOURCE_DIR, check_data_dir_writable
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -36,6 +37,7 @@ log = logging.getLogger("watcher")
 app = Flask(__name__,
             template_folder=os.path.join(RESOURCE_DIR, "templates"),
             static_folder=os.path.join(RESOURCE_DIR, "static"))
+check_data_dir_writable()
 db.init_db()
 # random per install, kept in the database so sessions survive restarts
 app.secret_key = db.secret_key()
@@ -105,7 +107,9 @@ def host_allowed(host: str) -> bool:
 
 @app.before_request
 def check_host():
-    if host_allowed(request.host):
+    # static files (the stylesheet) reveal nothing, and the refusal page
+    # needs its stylesheet to be readable
+    if request.endpoint == "static" or host_allowed(request.host):
         return None
     # Werkzeug blanks hostnames with illegal characters; show a placeholder
     name = request.host.rsplit(":", 1)[0] or "your-server-name"
@@ -149,11 +153,52 @@ def require_sign_in():
 
 
 def _safe_next(target: str | None) -> str:
-    """Only same-site paths: never '//evil.example' or a full URL."""
-    if (target and target.startswith("/")
-            and not target.startswith(("//", "/\\"))):
-        return target
-    return url_for("dashboard")
+    """Only a path on this site. Browsers drop tabs and newlines and treat
+    a backslash like a slash, so "/\t/evil.example" would become
+    "//evil.example" (another site): anything with those is refused."""
+    if (not target or not target.startswith("/")
+            or any(ch in target for ch in "\\\t\r\n")
+            or any(ord(ch) < 0x20 for ch in target)
+            or target.startswith("//")):
+        return url_for("dashboard")
+    parts = urlsplit(target)
+    if parts.scheme or parts.netloc:
+        return url_for("dashboard")
+    return target
+
+
+# Wrong passwords: after FREE_ATTEMPTS failures from one address, it must
+# wait, doubling each time (30 s, 1 min, 2 min ... up to 15 min). Guessing
+# is counted per address, and in total so many addresses can't share the
+# work. Nothing sleeps, so a flood of attempts can't stall the app.
+FREE_ATTEMPTS = 5
+FIRST_LOCKOUT = 30          # seconds
+MAX_LOCKOUT = 15 * 60
+GLOBAL_FREE_ATTEMPTS = 20   # all addresses together
+_login_lock = threading.Lock()
+_login_failures: dict[str, tuple[int, float]] = {}  # key -> (count, until)
+
+
+def _lockout_left(key: str) -> int:
+    with _login_lock:
+        _, until = _login_failures.get(key, (0, 0.0))
+    return max(0, int(until - time.monotonic() + 0.999))
+
+
+def _record_failure(key: str, free: int):
+    with _login_lock:
+        count, _ = _login_failures.get(key, (0, 0.0))
+        count += 1
+        until = 0.0
+        if count > free:
+            wait = min(FIRST_LOCKOUT * 2 ** (count - free - 1), MAX_LOCKOUT)
+            until = time.monotonic() + wait
+        _login_failures[key] = (count, until)
+
+
+def _clear_failures(key: str):
+    with _login_lock:
+        _login_failures.pop(key, None)
 
 
 app.config["PERMANENT_SESSION_LIFETIME"] = timedelta(days=30)
@@ -191,11 +236,18 @@ def csrf_protect():
     if expected and secrets.compare_digest(sent.encode(), expected.encode()):
         return None
     log.warning("Rejected POST %s without a valid CSRF token", request.path)
-    msg = ("This request didn't come from an Audible Watcher page (or your "
-           "session expired). Reload the page and try again.")
+    msg = ("That didn't go through: the page was out of date (or the "
+           "request didn't come from Audible Watcher). Nothing was "
+           "changed. Please try again.")
     if request.headers.get("X-Requested-With") == "fetch":
         return {"ok": False, "error": msg}, 400
-    return msg, 400, {"Content-Type": "text/plain; charset=utf-8"}
+    # back to the page it came from (only if that's this site), with a note
+    flash(msg, "error")
+    back = request.referrer or ""
+    parts = urlsplit(back)
+    target = (_safe_next(parts.path + (f"?{parts.query}" if parts.query else ""))
+              if parts.netloc == request.host else url_for("dashboard"))
+    return redirect(target)
 
 
 # ------------------------------------------------------------ templates
@@ -213,7 +265,7 @@ def _book_key(title, authors) -> tuple | None:
     """Edition-independent identity: normalised title + first author. Other
     regions' editions of a book have their own ASIN but the same key."""
     title = "".join(ch for ch in (title or "").lower() if ch.isalnum())
-    author = audible_api.norm_name((authors or "").split(",")[0])
+    author = audible_api.norm_name(audible_api.first_author(authors) or "")
     return (title, author) if title else None
 
 
@@ -258,6 +310,22 @@ def watch_id_for(wtype, name):
     return _watches_by_key().get((wtype, (name or "").strip().lower()))
 
 
+def audible_series_url(series_asin, series_title=""):
+    """The series' page in the user's Audible store."""
+    return audible_api.series_page_url(
+        db.get_settings().get("marketplace", "us"), series_asin, series_title)
+
+
+def series_url(name):
+    """The series' watch page if watched, else an in-app search for it
+    (where it can be watched)."""
+    name = (name or "").strip()
+    watch_id = watch_id_for("series", name)
+    if watch_id:
+        return url_for("watch_detail", watch_id=watch_id)
+    return url_for("search", q=name, type="series")
+
+
 def author_url(name):
     """The author's watch page if watched, else an in-app author search."""
     name = name.strip()
@@ -267,10 +335,23 @@ def author_url(name):
     return url_for("search", q=name, type="author")
 
 
-app.jinja_env.globals.update(ownership=ownership, is_owned=is_owned,
+app.jinja_env.globals.update(split_authors=audible_api.split_authors,
+                             ownership=ownership, is_owned=is_owned,
                              has_owned=has_owned,
-                             watch_id_for=watch_id_for, author_url=author_url)
+                             watch_id_for=watch_id_for, author_url=author_url,
+                             series_url=series_url,
+                             audible_series_url=audible_series_url)
 app.jinja_env.tests["owned"] = is_owned
+
+
+@app.template_filter("hours")
+def hours_filter(minutes) -> str:
+    """725 -> '12h 05m'."""
+    try:
+        m = int(minutes)
+    except (TypeError, ValueError):
+        return ""
+    return f"{m // 60}h {m % 60:02d}m" if m >= 60 else f"{m}m"
 
 
 @app.template_filter("localtime")
@@ -308,6 +389,7 @@ def _run_check(trigger: str):
     Audible was unreachable, try once more an hour later."""
     try:
         result = checker.check_all(trigger=trigger)
+        _refresh_library_if_stale()
         if result.get("aborted") and trigger != "retry":
             when = datetime.now() + RETRY_AFTER_OUTAGE
             scheduler.add_job(_retry_check, "date", run_date=when,
@@ -318,6 +400,29 @@ def _run_check(trigger: str):
         log.exception("%s check failed", trigger.capitalize())
     finally:
         _check_lock.release()
+
+
+LIBRARY_REFRESH = timedelta(hours=20)
+
+
+def _refresh_library_if_stale():
+    """Re-sync the connected Audible library about once a day (with the
+    daily check), so OWNED / PRE-ORDERED badges follow new purchases."""
+    if not account.is_connected():
+        return
+    last = db.get_settings().get("library_synced_at")
+    try:
+        synced = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+    except ValueError:
+        synced = None
+    if synced and datetime.now(timezone.utc) - synced < LIBRARY_REFRESH:
+        return
+    try:
+        n = account.sync_library()
+        log.info("Library synced: %d owned title(s)", n)
+    except Exception:  # noqa: BLE001 - badges just stay as they were
+        log.warning("Library sync failed; trying again next check",
+                    exc_info=True)
 
 
 def scheduled_check():
@@ -366,13 +471,17 @@ def dashboard():
     if view not in ("all", "author", "series"):
         view = "all"
     sort = request.args.get("sort", "recent")
-    if sort not in ("recent", "newest", "largest", "owned"):
+    allowed = (ALL_BOOKS_SORTS if view == "all"
+               else ("recent", "newest", "largest", "owned"))
+    if sort not in allowed:
         sort = "recent"
     watches = db.list_watches()
     fresh = db.new_books()
     checks = db.recent_checks(5)
     settings = db.get_settings()
     owned = db.owned_books_list() if tab == "library" else []
+    if view == "all":
+        owned = _sort_all_books(owned, sort)
     return render_template(
         "dashboard.html", tab=tab, view=view, sort=sort, fresh=fresh,
         checks=checks, settings=settings,
@@ -381,6 +490,46 @@ def dashboard():
         preorders=db.preorder_books(),
         owned=owned, owned_total=db.owned_count(),
         owned_groups=_group_owned(owned, view, sort))
+
+
+# Library → All books: sort options (the first is the default)
+ALL_BOOKS_SORTS = ("recent", "release", "title", "author", "length")
+_LEADING_ARTICLE = ("the ", "a ", "an ")
+
+
+def _title_key(b: dict) -> str:
+    """Title for sorting, ignoring a leading "The", "A" or "An"."""
+    t = (b.get("title") or "").strip().lower()
+    for art in _LEADING_ARTICLE:
+        if t.startswith(art):
+            return t[len(art):]
+    return t
+
+
+def _surname_key(b: dict) -> tuple:
+    """First author by surname: "Lee Child" -> ("child", "lee child");
+    "Martin Luther King, Jr." sorts under King."""
+    name = (audible_api.first_author(b.get("authors")) or "").split(",")[0]
+    parts = name.strip().lower().split()
+    return (parts[-1] if parts else "~", name.lower())
+
+
+def _sort_all_books(owned: list[dict], sort: str) -> list[dict]:
+    """Order the Library's All books view. 'recent' keeps the database
+    order: upcoming pre-orders first, then newest purchase first."""
+    if sort == "release":      # newest release first; pre-orders on top
+        return sorted(owned, key=lambda b: (b.get("release_date") or "9999",
+                                            _title_key(b)), reverse=True)
+    if sort == "title":
+        return sorted(owned, key=_title_key)
+    if sort == "author":       # by surname, then series order, then title
+        return sorted(owned, key=lambda b: (_surname_key(b),
+                                            b.get("series_title") or "~",
+                                            _seq_key(b), _title_key(b)))
+    if sort == "length":       # longest listen first
+        return sorted(owned, key=lambda b: (-(b.get("runtime_minutes") or 0),
+                                            _title_key(b)))
+    return owned
 
 
 def _seq_key(b: dict) -> tuple:
@@ -399,7 +548,7 @@ def _group_owned(owned: list[dict], view: str,
     if view == "author":
         groups: dict[str, list] = {}
         for b in owned:
-            key = (b["authors"] or "").split(",")[0].strip() or "Unknown"
+            key = audible_api.first_author(b["authors"]) or "Unknown"
             groups.setdefault(key, []).append(b)
         for grp in groups.values():  # newest release first within an author
             grp.sort(key=lambda b: b["release_date"] or "9999", reverse=True)
@@ -449,9 +598,16 @@ def watch_detail(watch_id):
             groups.items(),
             key=lambda kv: max((b["release_date"] or "9999") for b in kv[1]),
             reverse=True)
+    marketplace = db.get_settings().get("marketplace", "us")
+    audible_url = (audible_api.series_page_url(marketplace, w.get("asin"),
+                                               w["name"])
+                   if w["type"] == "series" else None)
     return render_template("watch.html", watch=w, books=books,
                            hidden_books=hidden_books, view=view,
-                           series_groups=series_groups)
+                           series_groups=series_groups,
+                           audible_url=audible_url,
+                           settings_language=(db.get_settings().get(
+                               "language") or "").strip().lower())
 
 
 @app.route("/search")
@@ -465,13 +621,19 @@ def search():
         try:
             # one query, both kinds of matches — the results speak for
             # themselves (an author name yields authors, a series name series)
-            books = audible_api.search_by_author(q, mp, max_results=20)
+            # relevance order: the newest products of a widely translated
+            # author are mostly translations, which the language filter
+            # would then remove entirely
+            books = audible_api.search_by_author(q, mp, max_results=50,
+                                                 sort=None)
             books = [b for b in books
                      if audible_api.matches_language(b, lang)]
             names = {}
             for b in books:
-                for name in (b["authors"] or "").split(","):
+                for name in b["author_list"]:  # "Name, Jr." stays whole
                     name = name.strip()
+                    if audible_api.is_role_credit(name):
+                        continue  # "X - introduction" isn't an author
                     if name and q.lower() in name.lower():
                         names.setdefault(name, {"name": name, "count": 0,
                                                 "sample": b})
@@ -497,6 +659,16 @@ def settings_page():
                   "settings not saved", "error")
             return redirect(url_for("settings_page"))
         values["check_hour"] = str(_parse_hour(values["check_hour"]))
+        saved_now = db.get_settings()
+        for k in ("marketplace", "language", "smtp_security"):
+            if k not in request.form:  # not on the form: keep what's saved
+                values[k] = saved_now.get(k, "")
+        if (values["marketplace"] not in audible_api.MARKETPLACES
+                or values["language"] not in ("", *audible_api.LANGUAGES)
+                or values["smtp_security"] not in ("ssl", "starttls")):
+            flash("Unknown marketplace, language or security setting — "
+                  "settings not saved", "error")
+            return redirect(url_for("settings_page"))
         port = values["smtp_port"]
         if port and not (port.isdigit() and 1 <= int(port) <= 65535):
             flash("SMTP port must be a number such as 465 or 587 — "
@@ -538,23 +710,12 @@ def settings_page():
                   "the setup steps under Email notifications.", "error")
         return redirect(url_for("settings_page"))
     return render_template("settings.html", settings=db.get_settings(),
-                           access=access_info(),
+                           access=access_info(), **_account_context(),
                            marketplaces=sorted(audible_api.MARKETPLACES),
                            languages=audible_api.LANGUAGES)
 
 
 # ------------------------------------------------------------------ actions
-
-def _primary_author(watch_id: int) -> str | None:
-    """Most common author name among a watch's visible books."""
-    counts: dict[str, int] = {}
-    for b in db.books_for_watch(watch_id):
-        for name in (b["authors"] or "").split(","):
-            name = name.strip()
-            if name:
-                counts[name] = counts.get(name, 0) + 1
-    return max(counts, key=counts.get) if counts else None
-
 
 @app.route("/watch/add", methods=["POST"])
 def add_watch():
@@ -575,6 +736,19 @@ def add_watch():
         flash("Name is required", "error")
         return redirect(request.referrer or url_for("dashboard"))
 
+    existing_id = db.find_watch(wtype, name)
+    if existing_id is not None:
+        # Re-adding must not re-record the baseline: a release that
+        # appeared since the last check would be filed as old and never
+        # flagged or emailed.
+        msg = f"You're already watching {wtype} “{name}”."
+        if wants_json:
+            return {"ok": True, "message": msg,
+                    "watch_url": url_for("watch_detail",
+                                         watch_id=existing_id)}
+        flash(msg, "ok")
+        return redirect(url_for("watch_detail", watch_id=existing_id))
+
     notes = []
     watch_id = db.add_watch(wtype, name, asin)
     try:
@@ -592,19 +766,15 @@ def add_watch():
         notes.append((f"Added “{name}” but the initial fetch failed: {e}",
                       "error"))
 
-    # watching a series implies watching its author for anything else they write
+    # watching a series implies watching its author for anything else they
+    # write. If the series' fetch failed, the first check that reaches
+    # Audible adds the author instead.
     if wtype == "series":
-        author = _primary_author(watch_id)
-        existing = {(w["type"], w["name"].lower()) for w in db.list_watches()}
-        if author and ("author", author.lower()) not in existing:
-            author_id = db.add_watch("author", author, None)
-            try:
-                n = checker.baseline_watch(author_id)
-                notes.append((f"Also watching author “{author}” — "
-                              f"found {n} existing title(s).", "ok"))
-            except Exception as e:  # noqa: BLE001
-                notes.append((f"Added author “{author}” but the initial "
-                              f"fetch failed: {e}", "error"))
+        added = checker.ensure_series_author(watch_id)
+        if added:
+            author, n = added
+            notes.append((f"Also watching author “{author}” — "
+                          f"found {n} existing title(s).", "ok"))
 
     if wants_json:
         return {"ok": True,
@@ -678,14 +848,24 @@ def seen_all():
     return redirect(url_for("dashboard"))
 
 
+def _account_context() -> dict:
+    """What the Audible account section of the Settings page shows."""
+    connected = account.is_connected()
+    return {"connected": connected,
+            "name": account.account_name() if connected else None,
+            "login_url": account.pending_login_url(),
+            "owned_count": db.owned_count(),
+            "synced_at": db.get_settings().get("library_synced_at")}
+
+
+def _account_section():
+    return url_for("settings_page", _anchor="account")
+
+
 @app.route("/account")
 def account_page():
-    return render_template(
-        "account.html", connected=account.is_connected(),
-        name=account.account_name() if account.is_connected() else None,
-        login_url=account.pending_login_url(),
-        owned_count=db.owned_count(),
-        synced_at=db.get_settings().get("library_synced_at"))
+    """The account section now lives on the Settings page."""
+    return redirect(_account_section())
 
 
 @app.route("/account/start", methods=["POST"])
@@ -695,7 +875,7 @@ def account_start():
         account.start_login(mp)
     except Exception as e:  # noqa: BLE001
         flash(f"Could not start the Amazon login: {e}", "error")
-    return redirect(url_for("account_page"))
+    return redirect(_account_section())
 
 
 @app.route("/account/complete", methods=["POST"])
@@ -703,14 +883,14 @@ def account_complete():
     url = (request.form.get("response_url") or "").strip()
     if not url:
         flash("Paste the full URL of the page Amazon left you on", "error")
-        return redirect(url_for("account_page"))
+        return redirect(_account_section())
     try:
         account.complete_login(url)
         n = account.sync_library()
         flash(f"Audible account connected — {n} owned title(s) synced", "ok")
     except Exception as e:  # noqa: BLE001
         flash(f"Connecting failed: {e}", "error")
-    return redirect(url_for("account_page"))
+    return redirect(_account_section())
 
 
 @app.route("/account/sync", methods=["POST"])
@@ -720,7 +900,7 @@ def account_sync():
         flash(f"Library synced — {n} owned title(s)", "ok")
     except Exception as e:  # noqa: BLE001
         flash(f"Library sync failed: {e}", "error")
-    return redirect(url_for("account_page"))
+    return redirect(_account_section())
 
 
 @app.route("/account/disconnect", methods=["POST"])
@@ -734,7 +914,7 @@ def account_disconnect():
               "couldn't be told. Remove the “Audible Watcher” device "
               "yourself under Amazon's “Manage Your Content and "
               "Devices”.", "error")
-    return redirect(url_for("account_page"))
+    return redirect(_account_section())
 
 
 @app.route("/healthz")
@@ -751,13 +931,22 @@ def login():
         return redirect(url_for("dashboard"))
     error = None
     if request.method == "POST":
+        who = f"ip:{request.remote_addr}"
+        wait = max(_lockout_left(who), _lockout_left("all"))
+        if wait:
+            error = (f"Too many wrong passwords. Wait {wait} seconds, then "
+                     "try again.")
+            return render_template("login.html", error=error,
+                                   next=request.values.get("next", "")), 429
         typed = request.form.get("password", "").encode()
         if secrets.compare_digest(typed, _password().encode()):
+            _clear_failures(who)
             session["signed_in"] = _password_tag()
             session.permanent = True  # stay signed in for 30 days
             return redirect(_safe_next(request.form.get("next")))
         log.warning("Failed sign-in from %s", request.remote_addr)
-        time.sleep(1)  # slow down password guessing
+        _record_failure(who, FREE_ATTEMPTS)
+        _record_failure("all", GLOBAL_FREE_ATTEMPTS)
         error = "That password isn't right."
     # keep where the user was heading across a wrong attempt
     return render_template("login.html", error=error,

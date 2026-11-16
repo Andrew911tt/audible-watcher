@@ -16,12 +16,12 @@ credentials, no scraping of web pages. Everything runs on your own computer.
 - **Amazon sign-in** — only if you connect your Audible account (optional).
 - **Your own email server** — to send you the notification emails.
 
-Optionally, you can connect your Audible account (Account page) to see
+Optionally, you can connect your Audible account (Settings → Audible account) to see
 OWNED badges on books you already have and PRE-ORDERED tags on the exact
 editions you've pre-ordered. You sign in on amazon.com in your own browser;
 the app never sees your password and stores only revocable device tokens
 (`audible_auth.json` — treat it like a key and don't share it). **Disconnect**
-on the Account page removes the app's device from your Amazon account and
+in Settings removes the app's device from your Amazon account and
 deletes the tokens; you can also revoke it from Amazon's "Manage Your
 Content and Devices".
 
@@ -48,8 +48,14 @@ Content and Devices".
     different Audible store, the next check quietly records a new baseline
     instead of flagging everything.
 - **Your library** (optional) — OWNED and PRE-ORDERED badges, and a Library
-  tab grouped by author or series. Books you own in another region's edition
-  count as owned.
+  tab with your upcoming pre-orders first. View it all at once (sorted by
+  recent purchase, release date, title, author or length) or grouped by
+  author or series. Books you own in another region's edition count as
+  owned. The library re-syncs about once a day with the daily check, so new
+  purchases show up on their own.
+- **Series links** — every series name links to that series' page in the
+  app (or a search, if you don't watch it yet), and series pages link to
+  the series in the Audible store.
 - **First published** dates: see when a book came out in print before the
   audiobook (can be turned off).
 - **Safe on your network** — an optional password, protection against
@@ -78,19 +84,39 @@ data folder*). Uninstalling leaves it in place.
 
 ### Docker (NAS / home server)
 
+A ready-made image is published with every release, so you only need a
+`docker-compose.yml`:
+
+```yaml
+services:
+  audible-watcher:
+    image: ghcr.io/andrew911tt/audible-watcher:latest
+    container_name: audible-watcher
+    restart: unless-stopped
+    ports: ["5055:5055"]
+    environment:
+      - TZ=America/Los_Angeles   # your time zone: the daily check uses it
+    volumes:
+      - ./data:/data
 ```
-git clone https://github.com/Andrew911tt/audible-watcher.git
-cd audible-watcher
-cp docker-compose.example.yml docker-compose.yml   # set TZ to your time zone
+
+```
+mkdir -p data && sudo chown 1000:1000 data
 docker compose up -d
 ```
 
-Then open **http://your-server:5055**. Data is kept in `./data`.
+Then open **http://your-server:5055**. Data is kept in `./data`. To update
+later: `docker compose pull && docker compose up -d`.
+
+Prefer to build it yourself? Clone the repository, copy
+`docker-compose.example.yml` to `docker-compose.yml` (it builds from
+source) and run `docker compose up -d`.
 
 **Upgrading a Docker install from 1.0.0 or 1.0.1:** since 1.0.2 the
 container runs as an unprivileged user (uid 1000) instead of root. Give it
 the data folder once before starting the new version:
-`sudo chown -R 1000:1000 ./data`.
+`sudo chown -R 1000:1000 ./data`. If you forget, the container stops with
+a message saying exactly that.
 
 ### From source (Windows, macOS, Linux)
 
@@ -266,7 +292,9 @@ python app.py
 
 **Signing in:** with `AW_PASSWORD` set, every device asks for the password
 once and then stays signed in for 30 days (**Sign out** is in the menu).
-Changing the password signs every device out.
+Changing the password signs every device out. After 5 wrong passwords from
+one address it has to wait before trying again (30 seconds, doubling up to
+15 minutes), and many addresses together are limited too.
 
 ## Notes
 
@@ -286,14 +314,31 @@ Changing the password signs every device out.
   only. They aren't saved up for one huge email when you switch it on, and
   books you've already marked seen are never emailed.
 - Marketplace: defaults to Audible US (audible.com). Change it in Settings if
-  you shop on a different regional store. Each store lists many books under
-  different IDs, so after a change the next check quietly re-records all
-  your watches for the new store; nothing is flagged as new.
-- Author watches match the exact name Audible credits (ignoring dots,
-  spaces and capitals), including co-written books. Books where the author
-  only wrote a foreword, an introduction or a translation aren't included.
-  If an author watch finds nothing, it shows a warning to check the
-  spelling.
+  you shop on a different regional store. Each store lists many books (and
+  series) under different IDs, so after a change the next check looks each
+  series up in the new store, quietly re-records all your watches there and
+  hides the old store's editions; nothing is flagged as new. A series the
+  new store doesn't carry shows a warning on the dashboard.
+- Search results show **Watching ✓** for authors and series you already
+  watch.
+- Author watches cover all of an author's titles and match the exact name
+  Audible credits (ignoring dots, spaces and capitals), including
+  co-written books. Books where the author only wrote a foreword, an
+  introduction or a translation aren't included. If an author watch finds
+  nothing, it shows a warning to check the spelling.
+- Books Audible lists under your watches but doesn't sell in your store
+  (usually another region's edition) are hidden. They're checked again
+  about once a week: if your store starts selling one, it comes back as a
+  new book and is emailed. Each watch's **Hidden entries** list says why
+  every book is hidden, and books you hide or unhide yourself stay that
+  way.
+- Updating Audible Watcher never floods you with "new" books: if an update
+  changes what the app fetches, the extra older titles it finds are added
+  quietly. Recent and upcoming releases still alert, and so does any book
+  that's genuinely new on Audible, whatever its release date.
+- If one watch turns up more than 10 new books in a single check (say
+  Audible adds an author's back catalogue), the email sums them up in one
+  line instead of listing them all; they're all on the dashboard.
 - A book that's in two series shows its number in each series on that
   series' page.
 - A book that matches two watches (e.g. the author *and* the series) shows
@@ -311,7 +356,13 @@ python -m pytest tests
 ```
 
 The tests use a mocked Audible API (and fake email and metadata servers),
-so no network is needed.
+so no network is needed, and they never touch a real Audible login.
+
+**Changing how watches fetch?** If a change makes watches see more or
+different titles (a bigger window, a different search), bump
+`FETCH_REVISION` in `audible_api.py`. Each watch's first check after the
+update then records the extra titles quietly instead of flagging them as
+new releases.
 
 GitHub Actions runs the tests on every push: on Windows and Linux with
 Python 3.12, plus Linux with Python 3.10 (the oldest supported) and 3.14.
@@ -319,13 +370,24 @@ It also builds the Docker image and checks that the container starts,
 runs as a non-root user, can write its data folder and refuses unknown
 hostnames.
 
+**Live catalog tests:** a few read-only checks against Audible's real
+catalog (well-known authors and series must be found and fetched), to catch
+changes on Audible's side that the fake catalog can't. They run weekly on
+GitHub Actions, or locally with:
+
+```
+AW_LIVE_TESTS=1 python -m pytest live_tests
+```
+
 **Building the Windows installer yourself:** install Python 3.12 and
 [Inno Setup 6](https://jrsoftware.org/isinfo.php), then run
 `powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -Version 1.0.0`.
 The installer lands in `packaging\Output\`.
 
-**Releases:** pushing a tag like `v1.0.0` makes GitHub Actions run the tests,
-build the installer and attach it to a new release.
+**Releases:** pushing a tag like `v1.0.0` makes GitHub Actions run the full
+test suite (every OS and Python version, plus the Docker check), then build
+the installer, attach it to a new release and publish the Docker image to
+`ghcr.io`. Nothing is published if any test fails.
 
 Pull requests and forks are welcome.
 

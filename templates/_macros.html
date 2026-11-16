@@ -27,7 +27,7 @@
 </details>
 {% endmacro %}
 
-{% macro book_card(b, show_source=False, show_owned=True) %}
+{% macro book_card(b, show_source=False, show_owned=True, show_length=False) %}
   {# dated future release = orderable pre-order; no date = TBA placeholder
      (Audible has no store page for it yet, so it isn't a pre-order) #}
   {% set preorder = b.release_date and b.release_date > today %}
@@ -50,14 +50,15 @@
       {% endif %}
       <a class="book-title" href="{{ b.url }}" target="_blank">{{ b.title }}</a>
       <div class="muted">
-        {%- for name in (b.authors or '').split(',') if name.strip() -%}
+        {%- for name in split_authors(b.authors) -%}
           <a class="author-link" href="{{ author_url(name) }}">{{ name.strip() }}</a>{{ ", " if not loop.last }}
         {%- endfor -%}
       </div>
       {% if b.series_title %}
-        <div class="muted"><em>{{ b.series_title }}{% if b.series_sequence %} · Book {{ b.series_sequence }}{% endif %}</em></div>
+        <div class="muted"><em><a class="series-link" href="{{ series_url(b.series_title) }}">{{ b.series_title }}</a>{% if b.series_sequence %} · Book {{ b.series_sequence }}{% endif %}</em></div>
       {% endif %}
-      <div class="release">📅 {{ b.release_date or 'TBA' }}</div>
+      <div class="release">📅 {{ b.release_date or 'TBA' }}
+        {%- if show_length and b.runtime_minutes %} · ⏱ {{ b.runtime_minutes|hours }}{% endif %}</div>
       {% if b.published_date and (not b.release_date
             or b.release_date[:b.published_date|length] != b.published_date) %}
         <div class="published" title="This book came out in print/ebook before the audiobook">

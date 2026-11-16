@@ -246,3 +246,33 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .host-refused pre { padding: 10px 12px; overflow-x: auto;
   white-space: pre; }
 .host-refused h2 { font-size: 16px; margin: 22px 0 6px; }
+.hidden-reason { font-size: 12px; opacity: .85; }
+.series-link { color: var(--muted); }
+.series-link:hover { color: var(--accent); }
+.account-panel { margin-top: 28px; }
+.account-panel:first-of-type { margin-top: 8px; }
+
+/* settings: every section is the same kind of card */
+.panel { background: var(--surface); border: 1px solid var(--border);
+  border-radius: 12px; padding: 18px 20px; margin: 0 0 18px; }
+.panel-title { color: var(--accent); font-size: 16px; font-weight: 600;
+  margin: 0 0 12px; }
+.panel > :last-child { margin-bottom: 0; }
+.panel p { font-size: 14px; line-height: 1.5; margin: 10px 0; }
+.panel p.small, .panel .small { font-size: 12px; }
+.panel .notice { margin: 0 0 12px; }
+.panel .help-box { background: var(--surface2); }
+.panel-actions { display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; margin: 14px 0; }
+.panel-actions form { margin: 0; }
+.save-bar { display: flex; align-items: center; gap: 12px;
+  margin: -4px 0 18px; padding: 0 4px; }
+.panel .access-table { background: transparent; border: none;
+  border-radius: 0; }
+.panel .access-table th { padding-left: 0; }
+.panel .access-table tr:first-child th, .panel .access-table tr:first-child td {
+  padding-top: 4px; }
+.settings-form .panel label:first-of-type { margin-top: 0; }
+@media (max-width: 600px) { .panel { padding: 14px; } }
+.default-submit { position: absolute; left: -10000px; width: 1px;
+  height: 1px; overflow: hidden; }

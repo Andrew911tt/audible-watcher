@@ -36,3 +36,23 @@ def _default_data_dir() -> str:
 
 DATA_DIR = os.environ.get("AW_DATA_DIR") or _default_data_dir()
 os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def check_data_dir_writable():
+    """Stop with a clear message (not a database traceback) if the data
+    folder can't be written — e.g. a Docker volume created by 1.0.0/1.0.1,
+    which ran as root, used with the non-root image from 1.0.2."""
+    probe = os.path.join(DATA_DIR, ".write-test")
+    try:
+        with open(probe, "w") as f:
+            f.write("ok")
+        os.remove(probe)
+    except OSError as e:
+        uid = os.getuid() if hasattr(os, "getuid") else None
+        msg = (f"Audible Watcher can't write to its data folder {DATA_DIR} "
+               f"({e.strerror}).")
+        if uid is not None:
+            msg += (f" It runs as user {uid}. On Docker, give that user the "
+                    f"folder once: sudo chown -R {uid}:{uid} ./data")
+        sys.stderr.write(msg + "\n")
+        raise SystemExit(2)

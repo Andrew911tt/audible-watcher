@@ -110,6 +110,20 @@
     <a class="btn btn-small {% if view == 'series' %}active{% endif %}"
        href="{{ url_for('dashboard', tab='library', view='series') }}">By series</a>
   </div>
+  {% if view == 'all' %}
+  <div class="view-toggle sort-toggle">
+    <span class="muted small">Sort:</span>
+    {% for key, label in [('recent', 'Recent purchase'),
+                          ('release', 'Release date'),
+                          ('title', 'Title'),
+                          ('author', 'Author'),
+                          ('length', 'Length')] %}
+    <a class="btn btn-small {% if sort == key %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', sort=key) if key != 'recent'
+                else url_for('dashboard', tab='library') }}">{{ label }}</a>
+    {% endfor %}
+  </div>
+  {% endif %}
   {% if view == 'series' %}
   <div class="view-toggle sort-toggle">
     <span class="muted small">Sort:</span>
@@ -132,13 +146,13 @@
     {% endfor %}
   {% else %}
   <div class="book-grid">
-    {% for b in owned %}{{ book_card(b, show_owned=False) }}{% endfor %}
+    {% for b in owned %}{{ book_card(b, show_owned=False, show_length=(sort == 'length')) }}{% endfor %}
   </div>
   {% endif %}
   {% else %}
   <p class="muted">No owned books synced yet —
-    <a href="{{ url_for('account_page') }}">connect your Audible account</a>
-    (or hit “Sync library now” on the Account page).</p>
+    <a href="{{ url_for('settings_page', _anchor='account') }}">connect your Audible account</a>
+    (or hit “Sync library now” under Audible account in Settings).</p>
   {% endif %}
 {% elif tab == 'series' %}
   {% if series %}{{ watch_table(series) }}

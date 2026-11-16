@@ -21,7 +21,8 @@ import mock_api
 # ---- bad input gets a clean answer, never HTTP 500 --------------------------
 
 def test_non_ascii_csrf_token_is_rejected_cleanly(client):
-    assert client.post("/seen-all", data={"csrf_token": "tök"}).status_code == 400
+    resp = client.post("/seen-all", data={"csrf_token": "tök"})
+    assert resp.status_code == 302  # refused cleanly, not a crash
 
 
 def test_unknown_watch_type_is_rejected(client):

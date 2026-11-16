@@ -4,9 +4,68 @@
 
 <h1>Settings</h1>
 
+<section class="panel" id="account">
+  <h2 class="panel-title">Audible account</h2>
+  {% if connected %}
+    <div class="notice">✅ Connected{% if name %} as <strong>{{ name }}</strong>{% endif %}
+      — {{ owned_count }} owned title(s)
+      {% if synced_at %}<span class="muted small">(last synced {{ synced_at|localtime }})</span>{% endif %}
+    </div>
+    <p>Books you own get an <span class="badge badge-owned">OWNED</span>
+      badge on watch pages. The library re-syncs by itself about once a
+      day; use “Sync library now” to pick up a purchase straight away.</p>
+    <div class="panel-actions">
+      <form method="post" action="{{ url_for('account_sync') }}">
+        <button class="btn btn-primary" type="submit">Sync library now</button>
+      {{ csrf_field() }}</form>
+      <form method="post" action="{{ url_for('account_disconnect') }}"
+            data-confirm="Disconnect your Audible account and remove owned-library data?">
+        <button class="btn btn-danger" type="submit">Disconnect</button>
+      {{ csrf_field() }}</form>
+    </div>
+    <p class="muted small">Your login happened on amazon.com — this app only
+      holds device tokens (in <code>audible_auth.json</code>), never your
+      password. Revoke them anytime from Amazon's
+      “Manage Your Content and Devices” page or the Disconnect button above.</p>
+
+  {% elif login_url %}
+    <p><strong>Finish connecting</strong></p>
+    <ol class="connect-steps">
+      <li><a class="btn btn-primary" href="{{ login_url }}" target="_blank" rel="noopener">
+          Open the Amazon sign-in page</a>
+          <span class="muted small">— sign in there as usual (password, 2FA,
+          CAPTCHA all happen on amazon.com, never here).</span></li>
+      <li>After signing in you'll land on a mostly-blank Amazon page
+          (the address contains <code>/ap/maplanding</code>).
+          <strong>Copy that page's full URL</strong> from the address bar.</li>
+      <li>Paste it here:
+        <form method="post" action="{{ url_for('account_complete') }}" class="search-form">
+          <input type="text" name="response_url"
+                 placeholder="https://www.amazon.com/ap/maplanding?...">
+          <button class="btn btn-primary" type="submit">Complete connection</button>
+        {{ csrf_field() }}</form>
+      </li>
+    </ol>
+
+  {% else %}
+    <p>Connect your Audible account to see which books you
+      already own. You sign in <strong>on amazon.com in your own browser</strong> —
+      this app never sees your password. It keeps only revocable device tokens,
+      the same way the official Audible app registers a device.</p>
+    <form method="post" action="{{ url_for('account_start') }}" class="panel-actions">
+      <button class="btn btn-primary" type="submit">Connect Audible account</button>
+    {{ csrf_field() }}</form>
+  {% endif %}
+</section>
+
+
 <form method="post" class="settings-form">
-  <fieldset>
-    <legend>Monitoring</legend>
+  {# Enter in a field submits with the form's first button: make that Save,
+     not "Send test email" further down #}
+  <button type="submit" class="default-submit" tabindex="-1"
+          aria-hidden="true">Save settings</button>
+  <section class="panel" id="monitoring">
+    <h2 class="panel-title">Monitoring</h2>
     <label>Audible marketplace
       <select name="marketplace">
         {% for m in marketplaces %}
@@ -40,11 +99,11 @@
     <span class="muted small checkbox-help">Looks up each book's title and
       author on Google Books and Open Library. Untick to keep those lookups
       off; nothing else is sent to them.</span>
-  </fieldset>
+  </section>
 
   {% set email_ready = settings.smtp_user and settings.smtp_password %}
-  <fieldset id="email">
-    <legend>Email notifications</legend>
+  <section class="panel" id="email">
+    <h2 class="panel-title">Email notifications</h2>
 
     <p class="help-text">After each check (daily, or when you click
       <em>Check Audible now</em>), Audible Watcher sends <strong>one digest
@@ -189,45 +248,47 @@
       <span class="muted small">Usually leave blank. Gmail always sends from
         your own address anyway.</span>
     </label>
-  </fieldset>
 
-  <div class="btn-row">
+    <div class="panel-actions">
+      <button class="btn" type="submit" formaction="{{ url_for('test_email') }}"
+              formnovalidate>Send test email</button>
+      <span class="muted small">Sends a short test message using the
+        <strong>saved</strong> settings — click <em>Save settings</em> first
+        if you changed anything.</span>
+    </div>
+
+    <details class="help-box troubleshooting">
+      <summary>Email not working? Troubleshooting</summary>
+      <dl>
+        <dt>“Username and password not accepted” / authentication failed</dt>
+        <dd>You probably entered your normal password. Create an app password
+          (steps above) and paste it in. Also check the email address is
+          complete (<code>you@gmail.com</code>, not just <code>you</code>).</dd>
+        <dt>“Wrong version number”, SSL errors, or the test hangs</dt>
+        <dd>The port and security setting don't match. Use port 465 with SSL,
+          or port 587 with STARTTLS.</dd>
+        <dt>“Could not connect” / name not found</dt>
+        <dd>Check the SMTP server name for typos. If this app runs on a home
+          server or NAS, make sure it can reach the internet and that your
+          network doesn't block outgoing mail ports.</dd>
+        <dt>Test says it was sent, but nothing arrives</dt>
+        <dd>Look in Spam/Junk and mark it “Not spam”. Check the “Send
+          notifications to” address for typos.</dd>
+        <dt>It worked before and suddenly stopped</dt>
+        <dd>Changing your Google password revokes all app passwords. Create a
+          new one and paste it in.</dd>
+      </dl>
+    </details>
+  </section>
+
+  <div class="save-bar">
     <button class="btn btn-primary" type="submit">Save settings</button>
+    <span class="muted small">Saves Monitoring and Email notifications.</span>
   </div>
 {{ csrf_field() }}</form>
 
-<form method="post" action="{{ url_for('test_email') }}" class="btn-row test-email">
-  <button class="btn" type="submit">Send test email</button>
-  <span class="muted small">Sends a short test message using the
-    <strong>saved</strong> settings — click <em>Save settings</em> first if
-    you changed anything.</span>
-{{ csrf_field() }}</form>
-
-<details class="help-box troubleshooting">
-  <summary>Email not working? Troubleshooting</summary>
-  <dl>
-    <dt>“Username and password not accepted” / authentication failed</dt>
-    <dd>You probably entered your normal password. Create an app password
-      (steps above) and paste it in. Also check the email address is
-      complete (<code>you@gmail.com</code>, not just <code>you</code>).</dd>
-    <dt>“Wrong version number”, SSL errors, or the test hangs</dt>
-    <dd>The port and security setting don't match. Use port 465 with SSL,
-      or port 587 with STARTTLS.</dd>
-    <dt>“Could not connect” / name not found</dt>
-    <dd>Check the SMTP server name for typos. If this app runs on a home
-      server or NAS, make sure it can reach the internet and that your
-      network doesn't block outgoing mail ports.</dd>
-    <dt>Test says it was sent, but nothing arrives</dt>
-    <dd>Look in Spam/Junk and mark it “Not spam”. Check the “Send
-      notifications to” address for typos.</dd>
-    <dt>It worked before and suddenly stopped</dt>
-    <dd>Changing your Google password revokes all app passwords. Create a
-      new one and paste it in.</dd>
-  </dl>
-</details>
-
-<section class="access-panel" id="access">
-  <h2>Access from other devices</h2>
+<section class="panel" id="access">
+  <h2 class="panel-title">Access from other devices</h2>
   <p class="muted small">These are set outside the app, not on this page,
     so a web page can never switch them off. They're set with environment
     variables, and the steps depend on how you installed Audible Watcher:
