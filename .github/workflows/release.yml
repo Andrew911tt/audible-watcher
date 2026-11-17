@@ -1,5 +1,7 @@
-# Push a tag like v1.0.0 to release: the full test suite (every OS and
-# Python version, plus the Docker check) must pass first. Then it builds the
+# Push a tag like v1.0.0 to release: the tag must match version.py and
+# CHANGELOG.md must have a section for it (that section becomes the release
+# notes). The full test suite (every OS and Python version, plus the Docker
+# check) must pass first. Then it builds the
 # Windows installer, attaches it to a GitHub release, and publishes the
 # Docker image to ghcr.io/<owner>/audible-watcher.
 name: release
@@ -23,6 +25,12 @@ jobs:
             echo "::error::Tag ${GITHUB_REF_NAME} doesn't match version.py ($v)"
             exit 1
           fi
+      - name: CHANGELOG.md has notes for this version
+        run: |
+          if ! python3 packaging/release_notes.py "${GITHUB_REF_NAME}" > /dev/null; then
+            echo "::error::Add a section for ${GITHUB_REF_NAME#v} to CHANGELOG.md"
+            exit 1
+          fi
 
   tests:
     needs: version
@@ -38,11 +46,9 @@ jobs:
           python-version: "3.12"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
-      - name: Release notes from the tagged commit's message
+      - name: Release notes from CHANGELOG.md
         shell: bash
-        run: |
-          # HEAD is the tagged commit (a shallow checkout may lack the tag ref)
-          git log -1 --format=%B HEAD | grep -v '^Co-Authored-By:' > release-notes.md
+        run: python packaging/release_notes.py "${GITHUB_REF_NAME}" > release-notes.md
       - name: Build app and installer
         shell: pwsh
         run: |

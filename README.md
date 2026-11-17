@@ -473,9 +473,11 @@ AW_LIVE_TESTS=1 python -m pytest live_tests
 (it uses the version in `version.py`; add `-Version 1.2.3` to override).
 The installer lands in `packaging\Output\`.
 
-**Releases:** set the new version in `version.py`, commit, then push a
-matching tag like `v1.1.0` (the release stops if they don't match). The
-release notes are the tagged commit's message. GitHub Actions runs the full
+**Releases:** set the new version in `version.py` and add a section for it
+at the top of [CHANGELOG.md](CHANGELOG.md), commit, then push a matching
+tag like `v1.1.0`. The release stops if the tag doesn't match `version.py`
+or the changelog has no section for it; that section becomes the release
+notes. GitHub Actions runs the full
 test suite (every OS and Python version, plus the Docker check), then builds
 the installer, attaches it to a new release and publishes the Docker image to
 `ghcr.io`. Nothing is published if any test fails.

@@ -320,7 +320,8 @@
 
 <section class="panel" id="updates">
   <h2 class="panel-title">About &amp; updates</h2>
-  <p>You're running <strong>Audible Watcher {{ update.current }}</strong>.</p>
+  <p>You're running <strong>Audible Watcher {{ update.current }}</strong>.
+    <a href="{{ update.changelog }}" target="_blank" rel="noopener">Changelog ↗</a></p>
   {% if update.error %}
     <div class="notice">⚠️ Couldn't check for updates
       {%- if update.checked_at %} ({{ update.checked_at|localtime }}){% endif %}:

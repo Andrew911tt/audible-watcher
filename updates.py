@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 REPO = "Andrew911tt/audible-watcher"
 LATEST_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 RELEASES_PAGE = f"https://github.com/{REPO}/releases"
+CHANGELOG_PAGE = f"https://github.com/{REPO}/blob/main/CHANGELOG.md"
 CACHE_FOR = timedelta(hours=12)
 TIMEOUT = 5  # seconds: never hold up a page or a check for long
 
@@ -87,6 +88,7 @@ def status() -> dict:
         "latest": latest,
         "available": is_newer(latest),
         "url": s.get("update_url") or RELEASES_PAGE,
+        "changelog": CHANGELOG_PAGE,
         "download": s.get("update_download") or None,
         "checked_at": s.get("update_checked_at") or None,
         "error": s.get("update_error") or None,
