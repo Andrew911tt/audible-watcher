@@ -4,7 +4,7 @@ A small self-hosted app that watches Audible for **new releases from your
 favorite authors, series and narrators** and **emails you** when something new shows up
 (including pre-orders, as soon as they're listed).
 
-![The Pre-orders tab: upcoming audiobooks from followed series and authors, each with cover, release date and a PRE-ORDER or PRE-ORDERED badge](docs/screenshots/preorders.png)
+![The Pre-orders tab: genre, length and source filters above upcoming audiobooks from followed series and authors, each with cover, narrator, release date and a PRE-ORDER or PRE-ORDERED badge](docs/screenshots/preorders.png)
 
 It uses Audible's public catalog API — no Audible login required, no
 credentials, no scraping of web pages. Everything runs on your own computer.
@@ -42,15 +42,19 @@ Content and Devices".
 ## Features
 
 - **Dashboard** showing everything you watch, with a "new books" section,
-  latest release dates, pre-orders and a check history log.
+  tabs for your authors, series, narrators, pre-orders, library and
+  wishlist, and a check history log.
 
-  ![The dashboard's Authors tab: each watched author with their number of titles, upcoming pre-orders and latest release date](docs/screenshots/dashboard.png)
+  ![The dashboard's Authors tab sorted by Last released: each watched author with their number of titles, upcoming pre-orders and the date of their most recent release](docs/screenshots/dashboard.png)
 
 - **Watch authors, series or narrators** — search Audible from the app
   and add them. Watching a series also watches its author. A narrator watch
   covers everything they narrate, including full-cast productions, and
   treats "Kevin R. Free" and "Kevin Free" as one person. Narrators are only
   watched when you add them yourself.
+
+  ![A narrator page (R.C. Bray): all 470 narrations, newest first, with PRE-ORDER, PRE-ORDERED and OWNED badges](docs/screenshots/narrator-page.png)
+
 - **Narrated by** on book cards (when a book has one narrator; full-cast
   lists show on watch pages), linking to that narrator's page or a search.
 - **Pre-orders filters** — narrow the Pre-orders tab by genre, length, or
@@ -58,8 +62,9 @@ Content and Devices".
   only change what you see, never what's watched or emailed.
 - **Daily automatic check** (time configurable) plus a "Check Audible now"
   button that runs in the background while the page updates itself.
-- **Email digest** via Gmail or any other email provider when new titles
-  appear, with step-by-step setup on the Settings page.
+- **Email digest** via Gmail, any other email provider or a mail relay on
+  your own network when new titles appear, with step-by-step setup on the
+  Settings page.
 - **No false alarms**:
   - When you add a watch, everything currently on Audible is recorded as a
     baseline. Only titles that appear *after* that are flagged.
@@ -76,7 +81,7 @@ Content and Devices".
   owned. The library re-syncs about once a day with the daily check, so new
   purchases show up on their own.
 
-  ![A series page (Murderbot Diaries) in series order: owned books carry an OWNED badge, and dramatized adaptations are listed next to the original editions](docs/screenshots/series-page.png)
+  ![A series page (Murderbot Diaries) in series order: owned books carry an OWNED badge, and dramatized adaptations are listed next to the original editions with their full casts](docs/screenshots/series-page.png)
 
 - **Wishlist price alerts** (optional, needs your Audible account) — an
   email when a title on your Audible wishlist drops to your alert price or
