@@ -91,6 +91,15 @@
       <input type="number" name="check_hour" min="0" max="23" required
              value="{{ settings.check_hour }}">
     </label>
+    <label>Wishlist alert price (at or below)
+      <input type="text" name="price_threshold" inputmode="decimal"
+             value="{{ settings.price_threshold }}" placeholder="e.g. 5.00 — blank for none">
+      <span class="muted small">Needs your Audible account connected. Your
+        wishlist prices are checked with the daily check and again 12 hours
+        later; you get an email when a title costs this much or less. Set
+        different prices for single titles on the dashboard's Wishlist
+        tab.</span>
+    </label>
     <label class="checkbox">
       <input type="checkbox" name="lookup_publish_dates"
              {% if settings.lookup_publish_dates != '0' %}checked{% endif %}>
@@ -118,7 +127,6 @@
       the next time you open the tray menu.</span>
   </section>
 
-  {% set email_ready = settings.smtp_user and settings.smtp_password %}
   <section class="panel" id="email">
     <h2 class="panel-title">Email notifications</h2>
 
@@ -237,7 +245,12 @@
       <select name="smtp_security">
         <option value="ssl" {% if settings.smtp_security == 'ssl' %}selected{% endif %}>SSL (port 465)</option>
         <option value="starttls" {% if settings.smtp_security == 'starttls' %}selected{% endif %}>STARTTLS (port 587)</option>
+        <option value="none" {% if settings.smtp_security == 'none' %}selected{% endif %}>None — mail relay on your own network (port 25)</option>
       </select>
+      <span class="muted small">None is only for a mail relay on your own
+        network that takes plain mail without a login (leave the email
+        address and app password blank). A login always needs SSL or
+        STARTTLS, so a password is never sent unencrypted.</span>
     </label>
     <label>Email address (SMTP username)
       <input type="email" name="smtp_user" value="{{ settings.smtp_user }}"
@@ -263,7 +276,8 @@
       <input type="text" name="email_from" value="{{ settings.email_from }}"
              placeholder="defaults to the address above">
       <span class="muted small">Usually leave blank. Gmail always sends from
-        your own address anyway.</span>
+        your own address anyway. Required for a mail relay without sign-in,
+        together with “Send notifications to”.</span>
     </label>
 
     <div class="panel-actions">

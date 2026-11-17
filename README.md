@@ -18,6 +18,8 @@ credentials, no scraping of web pages. Everything runs on your own computer.
   Monitoring → untick "Show when books first came out in print".
 - **Amazon's image servers** — your browser loads the cover pictures.
 - **Amazon sign-in** — only if you connect your Audible account (optional).
+  Once connected, the app reads your library and your wishlist with its
+  prices (for wishlist price alerts) from Amazon; nothing is sent back.
 - **Your own email server** — to send you the notification emails.
 - **GitHub** — the latest release number, to tell you when there's a new
   version: once a day, and when you click *Check for updates*. Nothing about
@@ -76,6 +78,12 @@ Content and Devices".
 
   ![A series page (Murderbot Diaries) in series order: owned books carry an OWNED badge, and dramatized adaptations are listed next to the original editions](docs/screenshots/series-page.png)
 
+- **Wishlist price alerts** (optional, needs your Audible account) — an
+  email when a title on your Audible wishlist drops to your alert price or
+  below. See [Wishlist price alerts](#wishlist-price-alerts).
+- **Last released** sort on the Authors, Series and Narrators tabs: the
+  ones with the most recent release (pre-orders don't count) come first,
+  so a book you may have missed rises to the top.
 - **Series links** — every series name links to that series' page in the
   app (or a search, if you don't watch it yet), and series pages link to
   the series in the Audible store.
@@ -193,6 +201,48 @@ sign-in for apps like this one.
 
 If a test email fails, the error message says what to fix (for example
 "use an app password, not your normal password").
+
+### Mail relay without sign-in
+
+If you run your own mail relay (for example a Postfix container on your
+NAS that forwards to your real mail provider), leave **Email address** and
+**App password** blank, set **Security** to *None* (plain SMTP, usually
+port 25) or *STARTTLS* if your relay offers it, and fill in both **From
+address** and **Send notifications to**. From a Docker container, a relay
+on the same machine is reached by the machine's LAN IP, not `localhost`.
+
+A login always needs SSL or STARTTLS: Settings won't save a username and
+password with Security set to *None*, because the password would cross
+the network unencrypted.
+
+## Wishlist price alerts
+
+With your Audible account connected, the app reads your Audible wishlist
+and its current prices, and emails you when a title costs your alert
+price or less.
+
+- **Default alert price:** Settings → Monitoring → *Wishlist alert price*.
+  Blank means no default.
+- **Per-title prices:** the dashboard's **Wishlist** tab lists every title
+  with its price now, list price and lowest price seen; type a price next
+  to a title to override the default for it (blank = use the default).
+- **When it checks:** with the daily check, and again 12 hours later, so a
+  one-day sale is caught whenever it starts. *Refresh prices now* on the
+  Wishlist tab checks immediately.
+- **What "price" means:** Audible's *lowest price* for the title on your
+  account: a sale or member price when there is one, otherwise the list
+  price. Credit prices are ignored.
+- **No repeats:** one email when a title reaches its alert price, another
+  only if it gets cheaper still. Once its price goes back above the alert
+  price, the alert re-arms. Changing an alert price re-arms it too.
+  Titles you already own are skipped.
+- Email follows the same switch as new-release emails: with email off,
+  matches show only on the Wishlist tab.
+
+Disconnecting your Audible account deletes the stored wishlist.
+
+Wishlist price alerts and mail-relay support were contributed in
+[mylacc/audible-watcher](https://github.com/mylacc/audible-watcher).
 
 ## Run it automatically (source / server installs)
 

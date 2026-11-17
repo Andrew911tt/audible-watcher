@@ -99,6 +99,30 @@ CREATE TABLE IF NOT EXISTS owned_books (
     preordered      INTEGER NOT NULL DEFAULT 0
 );
 
+-- the connected account's Audible wishlist, with prices (price alerts)
+CREATE TABLE IF NOT EXISTS wishlist (
+    asin            TEXT PRIMARY KEY,
+    title           TEXT,
+    authors         TEXT,
+    narrators       TEXT,
+    series_title    TEXT,
+    series_sequence TEXT,
+    release_date    TEXT,
+    image_url       TEXT,
+    url             TEXT,
+    price           REAL,     -- what you'd pay now (Audible's lowest price)
+    list_price      REAL,
+    price_type      TEXT,     -- Audible's label for that price: sale, member...
+    currency        TEXT,
+    lowest_seen     REAL,     -- lowest price seen since it was added here
+    target_price    REAL,     -- per-title alert price; NULL = the default
+    alerted_price   REAL,     -- price last alerted at; NULL = not alerted
+                              -- since it was last above its target
+    position        INTEGER,  -- order on the Audible wishlist
+    added_at        TEXT NOT NULL,
+    updated_at      TEXT
+);
+
 -- internal secrets, kept apart from user-facing settings
 CREATE TABLE IF NOT EXISTS app_secrets (
     key   TEXT PRIMARY KEY,
@@ -120,7 +144,7 @@ DEFAULT_SETTINGS = {
     "check_hour": "8",           # local hour of daily check
     "smtp_host": "smtp.gmail.com",
     "smtp_port": "465",
-    "smtp_security": "ssl",      # ssl | starttls
+    "smtp_security": "ssl",      # ssl | starttls | none (local relay)
     "smtp_user": "",
     "smtp_password": "",
     "email_from": "",
@@ -130,6 +154,7 @@ DEFAULT_SETTINGS = {
     "lookup_publish_dates": "1",  # ask Google Books / Open Library
     "update_check_auto": "1",    # ask GitHub once a day for a new version
     "update_tray_item": "1",     # "Check for updates" in the tray menu
+    "price_threshold": "",       # wishlist alert price; '' = no default
 }
 
 
@@ -354,6 +379,8 @@ def list_watches() -> list[dict]:
                    COUNT(wb.asin)                       AS book_count,
                    SUM(wb.is_new)                       AS new_count,
                    MAX(b.release_date)                  AS latest_release,
+                   MAX(CASE WHEN b.release_date <= ?    -- already out
+                            THEN b.release_date END)    AS last_released,
                    SUM(CASE WHEN b.release_date > ?  -- TBA isn't orderable
                             THEN 1 ELSE 0 END)          AS preorder_count
             FROM watches w
@@ -361,7 +388,7 @@ def list_watches() -> list[dict]:
             LEFT JOIN books b ON b.asin = wb.asin
             GROUP BY w.id
             ORDER BY w.type, w.name COLLATE NOCASE
-        """, (today,)).fetchall()
+        """, (today, today)).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -963,6 +990,99 @@ def owned_asins() -> set[str]:
 def owned_count() -> int:
     with conn() as c:
         return c.execute("SELECT COUNT(1) FROM owned_books").fetchone()[0]
+
+
+# ---------- wishlist (price alerts) ----------
+# (from the mylacc/audible-watcher fork)
+
+def replace_wishlist(rows: list[dict]):
+    """Store a freshly fetched wishlist. Titles that left the wishlist are
+    dropped; titles still on it keep their own target price, alert state
+    and lowest price seen."""
+    now = now_iso()
+    asins = [b["asin"] for b in rows if b.get("asin")]
+    with conn() as c:
+        if asins:
+            marks = ",".join("?" * len(asins))
+            c.execute(f"DELETE FROM wishlist WHERE asin NOT IN ({marks})",
+                      asins)
+        else:
+            c.execute("DELETE FROM wishlist")
+        for pos, b in enumerate(r for r in rows if r.get("asin")):
+            c.execute("""
+                INSERT INTO wishlist
+                (asin, title, authors, narrators, series_title,
+                 series_sequence, release_date, image_url, url, price,
+                 list_price, price_type, currency, lowest_seen, position,
+                 added_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(asin) DO UPDATE SET
+                    title = excluded.title, authors = excluded.authors,
+                    narrators = excluded.narrators,
+                    series_title = excluded.series_title,
+                    series_sequence = excluded.series_sequence,
+                    release_date = excluded.release_date,
+                    image_url = excluded.image_url, url = excluded.url,
+                    price = excluded.price,
+                    list_price = excluded.list_price,
+                    price_type = excluded.price_type,
+                    currency = excluded.currency,
+                    lowest_seen = CASE
+                        WHEN excluded.price IS NULL THEN wishlist.lowest_seen
+                        WHEN wishlist.lowest_seen IS NULL
+                          OR excluded.price < wishlist.lowest_seen
+                        THEN excluded.price
+                        ELSE wishlist.lowest_seen END,
+                    position = excluded.position,
+                    updated_at = excluded.updated_at
+            """, (b["asin"], b.get("title"), b.get("authors"),
+                  b.get("narrators"), b.get("series_title"),
+                  b.get("series_sequence"), b.get("release_date"),
+                  b.get("image_url"), b.get("url"), b.get("price"),
+                  b.get("list_price"), b.get("price_type"),
+                  b.get("currency"), b.get("price"), pos, now, now))
+
+
+def wishlist_items() -> list[dict]:
+    with conn() as c:
+        rows = c.execute("SELECT * FROM wishlist ORDER BY position, title"
+                         ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def wishlist_count() -> int:
+    with conn() as c:
+        return c.execute("SELECT COUNT(1) FROM wishlist").fetchone()[0]
+
+
+def set_wishlist_target(asin: str, target: float | None) -> bool:
+    """Set (or with None, clear) one title's alert price. A new target
+    re-arms the alert, so a title already at or below it is reported on
+    the next check. Returns whether the title is on the wishlist."""
+    with conn() as c:
+        cur = c.execute("UPDATE wishlist SET target_price = ?, "
+                        "alerted_price = NULL WHERE asin = ?",
+                        (target, asin))
+        return cur.rowcount > 0
+
+
+def mark_price_alerted(prices: dict[str, float]):
+    with conn() as c:
+        c.executemany("UPDATE wishlist SET alerted_price = ? WHERE asin = ?",
+                      [(p, a) for a, p in prices.items()])
+
+
+def rearm_price_alerts(asins: list[str]):
+    with conn() as c:
+        c.executemany("UPDATE wishlist SET alerted_price = NULL "
+                      "WHERE asin = ?", [(a,) for a in asins])
+
+
+def rearm_all_price_alerts():
+    """After the default alert price changes, every title is judged
+    afresh against it."""
+    with conn() as c:
+        c.execute("UPDATE wishlist SET alerted_price = NULL")
 
 
 # ---------- check log ----------

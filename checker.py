@@ -539,9 +539,19 @@ def send_email(subject: str, html: str, text: str, settings: dict):
     sender = settings["email_from"] or user
     recipients = [r.strip() for r in (settings["email_to"] or user).split(",")
                   if r.strip()]
-    if not user or not password:
+    security = settings.get("smtp_security", "ssl")
+    if bool(user) != bool(password):
         raise RuntimeError("SMTP username/app password not configured "
                            "(see Settings page)")
+    if not user and not (sender and recipients):
+        # no sign-in (a local mail relay): nothing to fall back on
+        raise RuntimeError("SMTP username/app password not configured, and "
+                           "for a mail relay without sign-in both the From "
+                           "address and “Send notifications to” are needed "
+                           "(see Settings page)")
+    if user and security == "none":
+        # the password would cross the network unencrypted
+        raise RuntimeError(LOGIN_NEEDS_ENCRYPTION)
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
@@ -554,16 +564,39 @@ def send_email(subject: str, html: str, text: str, settings: dict):
     msg.attach(MIMEText(text, "plain"))
     msg.attach(MIMEText(html, "html"))
 
-    if settings.get("smtp_security", "ssl") == "starttls":
+    if security in ("starttls", "none"):
+        # "none": plain SMTP, for a mail relay on your own network (never
+        # with a login: see above)
         with smtplib.SMTP(host, port, timeout=30) as s:
-            s.starttls(context=ssl.create_default_context())
-            s.login(user, password)
+            if security == "starttls":
+                s.starttls(context=ssl.create_default_context())
+            if user:
+                s.login(user, password)
             s.sendmail(sender, recipients, msg.as_string())
     else:
         with smtplib.SMTP_SSL(host, port, timeout=30,
                               context=ssl.create_default_context()) as s:
-            s.login(user, password)
+            if user:
+                s.login(user, password)
             s.sendmail(sender, recipients, msg.as_string())
+
+
+LOGIN_NEEDS_ENCRYPTION = (
+    "a login needs Security set to SSL or STARTTLS: with None the password "
+    "would be sent unencrypted. For a plain mail relay on your own network, "
+    "leave the username and password blank")
+
+
+def email_ready(settings: dict) -> bool:
+    """Enough is filled in to send: an account and its app password (over
+    SSL or STARTTLS), or (a mail relay without sign-in) a From and a To
+    address."""
+    if not settings.get("smtp_host"):
+        return False
+    if settings.get("smtp_user") or settings.get("smtp_password"):
+        return bool(settings.get("smtp_user") and settings.get("smtp_password")
+                    and settings.get("smtp_security") != "none")
+    return bool(settings.get("email_from") and settings.get("email_to"))
 
 
 def explain_smtp_error(e: Exception) -> str:
@@ -589,7 +622,11 @@ def explain_smtp_error(e: Exception) -> str:
     elif isinstance(e, (ConnectionError, smtplib.SMTPConnectError,
                         smtplib.SMTPServerDisconnected)):
         hint = ("couldn't connect to the mail server. Check the server name, "
-                "port and security setting")
+                "port and security setting (from a Docker container, a relay "
+                "on the same machine is its LAN IP, not localhost)")
+    elif isinstance(e, smtplib.SMTPSenderRefused):
+        hint = ("the mail server refused the From address. Use an address "
+                "the server or relay accepts")
     elif isinstance(e, smtplib.SMTPRecipientsRefused):
         hint = "the “Send notifications to” address was refused. Check it"
     else:
