@@ -28,7 +28,9 @@ import account
 import audible_api
 import checker
 import db
+import updates
 from paths import RESOURCE_DIR, check_data_dir_writable
+from version import __version__
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -370,12 +372,42 @@ def author_url(name):
     return url_for("search", q=name, type="author")
 
 
+def _narrator_watch_id(name):
+    """The watch for this narrator, however the book credits them
+    ("Kevin Free" on a "Kevin R. Free" watch), or None."""
+    if "narrator_watches" not in g:
+        g.narrator_watches = [(w["name"], w["id"]) for w in db.list_watches()
+                              if w["type"] == "narrator"]
+    for wname, wid in g.narrator_watches:
+        if audible_api.same_narrator(wname, name):
+            return wid
+    return None
+
+
+def narrator_url(name):
+    """The narrator's watch page if watched, else an in-app search."""
+    name = (name or "").strip()
+    watch_id = _narrator_watch_id(name)
+    if watch_id:
+        return url_for("watch_detail", watch_id=watch_id)
+    return url_for("search", q=name, type="narrator")
+
+
+def watched_group(wtype, name):
+    """watch_id_for, but a narrator matches however they're credited."""
+    if wtype == "narrator":
+        return _narrator_watch_id(name)
+    return watch_id_for(wtype, name)
+
+
 app.jinja_env.globals.update(split_authors=audible_api.split_authors,
                              ownership=ownership, is_owned=is_owned,
                              has_owned=has_owned,
                              watch_id_for=watch_id_for, author_url=author_url,
-                             series_url=series_url,
-                             audible_series_url=audible_series_url)
+                             series_url=series_url, narrator_url=narrator_url,
+                             watched_group=watched_group,
+                             audible_series_url=audible_series_url,
+                             app_version=__version__)
 app.jinja_env.tests["owned"] = is_owned
 
 
@@ -425,6 +457,8 @@ def _run_check(trigger: str):
     try:
         result = checker.check_all(trigger=trigger)
         _refresh_library_if_stale()
+        if db.get_settings().get("update_check_auto", "1") == "1":
+            updates.check()  # at most every 12 h; never raises
         if result.get("aborted") and trigger != "retry":
             when = datetime.now() + RETRY_AFTER_OUTAGE
             scheduler.add_job(_retry_check, "date", run_date=when,
@@ -500,10 +534,10 @@ def reschedule():
 @app.route("/")
 def dashboard():
     tab = request.args.get("tab", "authors")
-    if tab not in ("authors", "series", "preorders", "library"):
+    if tab not in ("authors", "series", "narrators", "preorders", "library"):
         tab = "authors"
     view = request.args.get("view", "all")
-    if view not in ("all", "author", "series"):
+    if view not in ("all", "author", "series", "narrator"):
         view = "all"
     sort = request.args.get("sort", "recent")
     allowed = (ALL_BOOKS_SORTS if view == "all"
@@ -517,14 +551,65 @@ def dashboard():
     owned = db.owned_books_list() if tab == "library" else []
     if view == "all":
         owned = _sort_all_books(owned, sort)
+    preorders = db.preorder_books()
+    filters = _preorder_filters(preorders)
+    update = updates.status()
+    show_update = (update["available"] and not update["dismissed"]
+                   and settings.get("update_check_auto", "1") == "1")
     return render_template(
         "dashboard.html", tab=tab, view=view, sort=sort, fresh=fresh,
         checks=checks, settings=settings,
         authors=[w for w in watches if w["type"] == "author"],
         series=[w for w in watches if w["type"] == "series"],
-        preorders=db.preorder_books(),
+        narrators=[w for w in watches if w["type"] == "narrator"],
+        preorders=preorders, shown_preorders=_filter_books(preorders, filters),
+        filters=filters,
+        update=update if show_update else None,
         owned=owned, owned_total=db.owned_count(),
         owned_groups=_group_owned(owned, view, sort))
+
+
+# Pre-orders tab filters: they only change what's shown, never what's
+# watched or emailed
+LENGTH_FILTERS = (("", "Any length"), ("3", "3 hours or more"),
+                  ("6", "6 hours or more"), ("10", "10 hours or more"))
+SOURCE_FILTERS = (("", "All watches"), ("series", "Series"),
+                  ("author", "Authors"), ("narrator", "Narrators"))
+
+
+def _preorder_filters(books: list[dict]) -> dict:
+    """The chosen filters (unknown values ignored) and the genre choices,
+    taken from the books themselves, with counts."""
+    counts: dict[str, int] = {}
+    for b in books:
+        for label in db.book_genres(b):
+            counts[label] = counts.get(label, 0) + 1
+    genre = request.args.get("genre", "")
+    length = request.args.get("length", "")
+    source = request.args.get("source", "")
+    return {
+        "genre": genre if genre in counts else "",
+        "length": length if length in dict(LENGTH_FILTERS) else "",
+        "source": source if source in dict(SOURCE_FILTERS) else "",
+        "genres": sorted(counts.items(), key=lambda kv: kv[0].casefold()),
+        "lengths": LENGTH_FILTERS, "sources": SOURCE_FILTERS,
+        "sep": audible_api.GENRE_SEP,
+    }
+
+
+def _filter_books(books: list[dict], f: dict) -> list[dict]:
+    out = []
+    for b in books:
+        if f["genre"] and f["genre"] not in db.book_genres(b):
+            continue
+        # unknown length (often the case for pre-orders) never hides a book
+        if (f["length"] and b.get("runtime_minutes")
+                and b["runtime_minutes"] < int(f["length"]) * 60):
+            continue
+        if f["source"] and b.get("watch_type") != f["source"]:
+            continue
+        out.append(b)
+    return out
 
 
 # Library → All books: sort options (the first is the default)
@@ -580,14 +665,28 @@ def _seq_key(b: dict) -> tuple:
 def _group_owned(owned: list[dict], view: str,
                  sort: str = "recent") -> list[tuple] | None:
     """Group the owned library for the Library tab's sub-views."""
-    if view == "author":
+    if view in ("author", "narrator"):
+        field = "authors" if view == "author" else "narrators"
         groups: dict[str, list] = {}
+        spellings: dict[str, dict] = {}  # narrators: credit -> times used
         for b in owned:
-            key = audible_api.first_author(b["authors"]) or "Unknown"
+            key = audible_api.first_author(b[field]) or "Unknown"
+            if view == "narrator" and key != "Unknown":
+                # one narrator credited two ways ("R. C. Bray", "R.C. Bray")
+                # is one group
+                key = next((k for k in groups
+                            if audible_api.same_narrator(k, key)), key)
+                names = spellings.setdefault(key, {})
+                credit = audible_api.first_author(b[field])
+                names[credit] = names.get(credit, 0) + 1
             groups.setdefault(key, []).append(b)
         for grp in groups.values():  # newest release first within an author
             grp.sort(key=lambda b: b["release_date"] or "9999", reverse=True)
-        return sorted(groups.items(), key=lambda kv: kv[0].lower())
+        # each narrator group is labelled with the spelling used most
+        named = [(max(spellings[k], key=spellings[k].get)
+                  if k in spellings else k, grp)
+                 for k, grp in groups.items()]
+        return sorted(named, key=lambda kv: kv[0].lower())
     if view == "series":
         groups = {}
         for b in owned:
@@ -676,7 +775,7 @@ def watch_detail(watch_id):
 @app.route("/search")
 def search():
     q = (request.args.get("q") or "").strip()
-    results, series_results = [], []
+    results, series_results, narrator_results = [], [], []
     if q:
         settings = db.get_settings()
         mp = settings.get("marketplace", "us")
@@ -705,10 +804,42 @@ def search():
             results = sorted(names.values(), key=lambda x: -x["count"])
             series_results = audible_api.search_series_candidates(
                 q, mp, language=lang)
+            narrator_results = _narrator_matches(q, mp, lang)
         except audible_api.AudibleAPIError as e:
             flash(f"Audible search failed: {e}", "error")
     return render_template("search.html", q=q,
-                           results=results, series_results=series_results)
+                           results=results, series_results=series_results,
+                           narrator_results=narrator_results)
+
+
+def _narrator_matches(q: str, marketplace: str, lang: str) -> list[dict]:
+    """Narrators whose credits contain the search words, most titles
+    first. One narrator credited several ways ("Kevin R. Free", "Kevin
+    Free") is one result, under the name used most."""
+    books = [b for b in audible_api.search_by_narrator(
+                 q, marketplace, max_results=50, sort=None)
+             if audible_api.matches_language(b, lang)
+             and not audible_api.is_podcast(b)]
+    people: list[dict] = []
+    for b in books:
+        for name in b["narrator_list"]:
+            name = name.strip()
+            if not name or not (q.casefold() in name.casefold()
+                                or audible_api.same_narrator(q, name)):
+                continue
+            person = next((p for p in people
+                           if audible_api.same_narrator(p["first"], name)),
+                          None)
+            if person is None:
+                person = {"first": name, "names": {}, "count": 0,
+                          "sample": b}
+                people.append(person)
+            person["names"][name] = person["names"].get(name, 0) + 1
+            person["count"] += 1
+    for p in people:
+        ranked = sorted(p["names"], key=lambda n: -p["names"][n])
+        p["name"], p["also"] = ranked[0], ranked[1:]
+    return sorted(people, key=lambda p: -p["count"])
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -755,6 +886,10 @@ def settings_page():
         values["email_enabled"] = "1" if request.form.get("email_enabled") else "0"
         values["lookup_publish_dates"] = (
             "1" if request.form.get("lookup_publish_dates") else "0")
+        values["update_check_auto"] = (
+            "1" if request.form.get("update_check_auto") else "0")
+        values["update_tray_item"] = (
+            "1" if request.form.get("update_tray_item") else "0")
         marketplace_changed = (values["marketplace"]
                                != current.get("marketplace", "us"))
         db.save_settings(values)
@@ -775,6 +910,7 @@ def settings_page():
         return redirect(url_for("settings_page"))
     return render_template("settings.html", settings=db.get_settings(),
                            access=access_info(), **_account_context(),
+                           update=updates.status(),
                            marketplaces=sorted(audible_api.MARKETPLACES),
                            languages=audible_api.LANGUAGES)
 
@@ -789,7 +925,7 @@ def add_watch():
     wtype = request.form.get("type", "author")
     name = (request.form.get("name") or "").strip()
     asin = request.form.get("asin") or None
-    if wtype not in ("author", "series"):
+    if wtype not in ("author", "series", "narrator"):
         if wants_json:
             return {"ok": False, "error": "Unknown watch type"}, 400
         flash("Unknown watch type", "error")
@@ -801,6 +937,12 @@ def add_watch():
         return redirect(request.referrer or url_for("dashboard"))
 
     existing_id = db.find_watch(wtype, name)
+    if existing_id is None and wtype == "narrator":
+        # "Kevin Free" when you already watch "Kevin R. Free"
+        existing_id = next((w["id"] for w in db.list_watches()
+                            if w["type"] == "narrator"
+                            and audible_api.same_narrator(w["name"], name)),
+                           None)
     if existing_id is not None:
         # Re-adding must not re-record the baseline: a release that
         # appeared since the last check would be filed as old and never
@@ -817,10 +959,10 @@ def add_watch():
     watch_id = db.add_watch(wtype, name, asin)
     try:
         n = checker.baseline_watch(watch_id)
-        if n == 0 and wtype == "author":
-            notes.append((f"Now watching author “{name}”, but Audible lists "
-                          "no titles under exactly that name. Check the "
-                          "spelling, or add them from a search result.",
+        if n == 0 and wtype in ("author", "narrator"):
+            notes.append((f"Now watching {wtype} “{name}”, but Audible "
+                          "lists no titles under exactly that name. Check "
+                          "the spelling, or add them from a search result.",
                           "error"))
         else:
             notes.append((f"Now watching {wtype} “{name}” — found {n} "
@@ -968,6 +1110,28 @@ def account_disconnect():
               "yourself under Amazon's “Manage Your Content and "
               "Devices”.", "error")
     return redirect(_account_section())
+
+
+@app.route("/updates/check", methods=["POST"])
+def updates_check():
+    info = updates.check(force=True)
+    if info["error"]:
+        flash(f"Couldn't check for updates right now: {info['error']}.",
+              "error")
+    elif info["available"]:
+        flash(f"Audible Watcher {info['latest']} is available (you have "
+              f"{info['current']}).", "ok")
+    else:
+        flash(f"You're up to date ({info['current']}).", "ok")
+    return redirect(url_for("settings_page", _anchor="updates"))
+
+
+@app.route("/updates/dismiss", methods=["POST"])
+def updates_dismiss():
+    latest = updates.status()["latest"]
+    if latest:
+        updates.dismiss(latest)
+    return redirect(request.referrer or url_for("dashboard"))
 
 
 @app.route("/healthz")

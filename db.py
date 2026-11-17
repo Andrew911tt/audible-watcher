@@ -29,7 +29,8 @@ CREATE TABLE IF NOT EXISTS settings (
 
 CREATE TABLE IF NOT EXISTS watches (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    type            TEXT NOT NULL CHECK (type IN ('author', 'series')),
+    type            TEXT NOT NULL
+                    CHECK (type IN ('author', 'series', 'narrator')),
     name            TEXT NOT NULL,
     asin            TEXT,
     created_at      TEXT NOT NULL,
@@ -52,6 +53,7 @@ CREATE TABLE IF NOT EXISTS books (
     release_date    TEXT,
     runtime_minutes INTEGER,
     language        TEXT,
+    genres          TEXT,     -- JSON list: "Fantasy", "Fantasy › Epic"...
     published_date  TEXT,
     available       INTEGER,  -- sold in our marketplace? NULL = unchecked
     available_checked_at TEXT,  -- when that was last asked
@@ -74,8 +76,9 @@ CREATE TABLE IF NOT EXISTS watch_books (
                                                -- dated listing
     keep_visible  INTEGER NOT NULL DEFAULT 0,  -- you unhid it: never hide
                                                -- it again automatically
-    mismatch_hidden INTEGER NOT NULL DEFAULT 0,  -- not this author's book
-                                               -- (or a podcast)
+    mismatch_hidden INTEGER NOT NULL DEFAULT 0,  -- not this author's (or
+                                               -- narrator's) book, or a
+                                               -- podcast
     PRIMARY KEY (asin, watch_id)
 );
 
@@ -125,6 +128,8 @@ DEFAULT_SETTINGS = {
     "email_enabled": "0",
     "language": "",              # '' = any language
     "lookup_publish_dates": "1",  # ask Google Books / Open Library
+    "update_check_auto": "1",    # ask GitHub once a day for a new version
+    "update_tray_item": "1",     # "Check for updates" in the tray menu
 }
 
 
@@ -187,6 +192,8 @@ def init_db():
             c.execute("ALTER TABLE books ADD COLUMN available INTEGER")
         if "all_series" not in book_cols:
             c.execute("ALTER TABLE books ADD COLUMN all_series TEXT")
+        if "genres" not in book_cols:
+            c.execute("ALTER TABLE books ADD COLUMN genres TEXT")
         watch_cols = {r["name"]
                       for r in c.execute("PRAGMA table_info(watches)")}
         link_cols = {r["name"]
@@ -239,6 +246,54 @@ def init_db():
         for k, v in DEFAULT_SETTINGS.items():
             c.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                       (k, v))
+    _allow_narrator_watches()
+
+
+def _allow_narrator_watches():
+    """Databases from before 1.1.0 only allow 'author' and 'series' watches,
+    and SQLite can't change a CHECK constraint: rebuild the watches table
+    the way SQLite documents it (new table, copy, drop, rename). Ids are
+    kept, so every book link and its state survives."""
+    c = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
+    c.row_factory = sqlite3.Row
+    try:
+        sql = c.execute("SELECT sql FROM sqlite_master WHERE type = 'table' "
+                        "AND name = 'watches'").fetchone()
+        if not sql or "'narrator'" in sql[0]:
+            return
+        # (outside a transaction: it can't change inside one) dropping the
+        # old table must not cascade into watch_books
+        c.execute("PRAGMA foreign_keys = OFF")
+        c.execute("BEGIN IMMEDIATE")
+        try:
+            new_sql = SCHEMA.split("CREATE TABLE IF NOT EXISTS watches", 1)[1]
+            new_sql = new_sql.split(");", 1)[0] + ")"
+            c.execute("CREATE TABLE watches_new" + new_sql)
+            old_cols = [r["name"] for r in
+                        c.execute("PRAGMA table_info(watches)")]
+            new_cols = {r["name"] for r in
+                        c.execute("PRAGMA table_info(watches_new)")}
+            cols = ", ".join(col for col in old_cols if col in new_cols)
+            c.execute(f"INSERT INTO watches_new ({cols}) "
+                      f"SELECT {cols} FROM watches")
+            seq = c.execute("SELECT seq FROM sqlite_sequence "
+                            "WHERE name = 'watches'").fetchone()
+            c.execute("DROP TABLE watches")
+            c.execute("ALTER TABLE watches_new RENAME TO watches")
+            if seq:  # never reuse the id of a watch that was removed
+                c.execute("UPDATE sqlite_sequence SET seq = max(seq, ?) "
+                          "WHERE name = 'watches'", (seq[0],))
+            broken = c.execute("PRAGMA foreign_key_check").fetchall()
+            if broken:
+                raise sqlite3.IntegrityError(
+                    f"watches migration broke {len(broken)} link(s)")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
+    finally:
+        c.execute("PRAGMA foreign_keys = ON")
+        c.close()
 
 
 # ---------- settings ----------
@@ -388,8 +443,8 @@ _BOOK_UPSERT = """
     INSERT INTO books
     (asin, title, subtitle, authors, narrators, series_title,
      series_sequence, all_series, release_date, runtime_minutes, language,
-     image_url, url)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     image_url, url, genres)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(asin) DO UPDATE SET
         title = excluded.title,
         subtitle = excluded.subtitle,
@@ -402,7 +457,8 @@ _BOOK_UPSERT = """
         runtime_minutes = excluded.runtime_minutes,
         language = excluded.language,
         image_url = excluded.image_url,
-        url = excluded.url
+        url = excluded.url,
+        genres = COALESCE(excluded.genres, books.genres)
 """
 # published_date is deliberately not refreshed here — it comes from the
 # metadata enrichment, not the Audible catalog.
@@ -465,17 +521,27 @@ def upsert_books(watch_id: int, books: list[dict], as_new: bool,
                 b.get("release_date"),
                 b.get("runtime_minutes"), b.get("language"),
                 b.get("image_url"), b.get("url"),
+                json.dumps(b["genres"]) if b.get("genres") else None,
             ))
             if b["asin"] in existing:
                 continue
+            new = as_new and not hidden
+            if new and c.execute(
+                    "SELECT 1 FROM watch_books WHERE asin = ? "
+                    "AND watch_id != ? AND notified = 1",
+                    (b["asin"], watch_id)).fetchone():
+                # already announced by another watch (e.g. a narrator
+                # credited weeks after the author's watch found the book):
+                # it isn't new again
+                new = False
             c.execute("""
                 INSERT OR IGNORE INTO watch_books
                 (watch_id, asin, discovered_at, is_new, notified, hidden)
                 VALUES (?, ?, ?, ?, ?, ?)
             """, (
                 watch_id, b["asin"], now_iso(),
-                1 if (as_new and not hidden) else 0,
-                0 if (as_new and not hidden) else 1,
+                1 if new else 0,
+                0 if new else 1,
                 1 if hidden else 0,
             ))
             inserted.append(b)
@@ -508,16 +574,20 @@ def books_for_watch(watch_id: int, include_hidden: bool = False) -> list[dict]:
     return _book_rows(rows)
 
 
+# which watch a book is credited to when it matches several: the most
+# specific reason you follow it
+ATTRIBUTION = {"series": 0, "author": 1, "narrator": 2}
+
+
 def dedupe_by_asin(rows) -> list[dict]:
     """One entry per book, keeping list order. When a book matches several
-    watches (e.g. its author and its series) the series watch wins the
-    attribution."""
+    watches, the attribution goes to series, then author, then narrator."""
     best: dict[str, dict] = {}
     for r in rows:
         r = _watched_series(dict(r))
         cur = best.get(r["asin"])
-        if cur is None or (r["watch_type"] == "series"
-                           and cur["watch_type"] != "series"):
+        if cur is None or (ATTRIBUTION.get(r["watch_type"], 9)
+                           < ATTRIBUTION.get(cur["watch_type"], 9)):
             best[r["asin"]] = r  # dict keeps first-seen position on replace
     return list(best.values())
 
@@ -681,6 +751,14 @@ def preorder_books() -> list[dict]:
     return dedupe_by_asin(rows)
 
 
+def book_genres(book: dict) -> list[str]:
+    """The stored genre labels of a book row."""
+    try:
+        return json.loads(book.get("genres") or "[]")
+    except ValueError:
+        return []
+
+
 def unnotified_books() -> list[dict]:
     with conn() as c:
         rows = c.execute("""
@@ -742,21 +820,26 @@ def _is_alt_version(title: str | None) -> bool:
 
 
 def hide_not_by_author(watch_id: int, author: str,
-                       current: set[str]) -> int:
-    """Hide books on an author watch that aren't that author's audiobooks:
-    entries from before exact author matching (e.g. "Scott Meyers" on a
-    "Scott Meyer" watch) and podcasts. A book is kept if this check's fetch
-    returned it (`current`) or its credits name the author. Hidden the
-    normal way (Unhide works and sticks), never emailed."""
+                       current: set[str], narrator: bool = False) -> int:
+    """Hide books on an author (or narrator=True: narrator) watch that
+    aren't that person's audiobooks: entries from before exact matching
+    (e.g. "Scott Meyers" on a "Scott Meyer" watch) and podcasts. A book is
+    kept if this check's fetch returned it (`current`) or its credits name
+    the person. Hidden the normal way (Unhide works and sticks), never
+    emailed."""
     import audible_api  # (db stays importable on its own)
     target = audible_api.norm_name(author)
     stale = []
     for b in books_for_watch(watch_id):
         if b["keep_visible"] or b["asin"] in current:
             continue
-        credited = audible_api._credited_names(
-            audible_api.split_authors(b["authors"]))
-        if target not in credited:
+        if narrator:
+            ok = audible_api.credits_narrator(
+                audible_api.split_authors(b["narrators"]), author)
+        else:
+            ok = target in audible_api._credited_names(
+                audible_api.split_authors(b["authors"]))
+        if not ok:
             stale.append(b["asin"])
     if stale:
         with conn() as c:

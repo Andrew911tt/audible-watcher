@@ -99,6 +99,23 @@
     <span class="muted small checkbox-help">Looks up each book's title and
       author on Google Books and Open Library. Untick to keep those lookups
       off; nothing else is sent to them.</span>
+    <label class="checkbox">
+      <input type="checkbox" name="update_check_auto"
+             {% if settings.update_check_auto != '0' %}checked{% endif %}>
+      Check for new versions of Audible Watcher once a day
+    </label>
+    <span class="muted small checkbox-help">Asks GitHub for the latest
+      release number and shows a notice on the dashboard when there's a
+      new one. Nothing about you or your watches is sent, and nothing is
+      installed by itself. Untick to only check when you click the
+      button under About &amp; updates.</span>
+    <label class="checkbox">
+      <input type="checkbox" name="update_tray_item"
+             {% if settings.update_tray_item != '0' %}checked{% endif %}>
+      Show “Check for updates” in the tray menu
+    </label>
+    <span class="muted small checkbox-help">Windows app only. Takes effect
+      the next time you open the tray menu.</span>
   </section>
 
   {% set email_ready = settings.smtp_user and settings.smtp_password %}
@@ -286,6 +303,48 @@
     <span class="muted small">Saves Monitoring and Email notifications.</span>
   </div>
 {{ csrf_field() }}</form>
+
+<section class="panel" id="updates">
+  <h2 class="panel-title">About &amp; updates</h2>
+  <p>You're running <strong>Audible Watcher {{ update.current }}</strong>.</p>
+  {% if update.error %}
+    <div class="notice">⚠️ Couldn't check for updates
+      {%- if update.checked_at %} ({{ update.checked_at|localtime }}){% endif %}:
+      {{ update.error }}.</div>
+  {% elif update.available %}
+    <div class="notice">⬆️ <strong>Version {{ update.latest }} is available.</strong>
+      <a href="{{ update.url }}" target="_blank" rel="noopener">What's new ↗</a></div>
+    <p><strong>How to update</strong>
+      {%- if update.install == 'windows' %} (Windows app):
+        {% if update.download %}<a href="{{ update.download }}" rel="noopener">download the new installer</a>{% else %}download the new installer from the <a href="{{ update.url }}" target="_blank" rel="noopener">release page</a>{% endif %}
+        and run it. Your watches and settings are kept.
+      {%- elif update.install == 'docker' %} (Docker):
+        <code>docker compose pull &amp;&amp; docker compose up -d</code>
+        (or <code>docker compose up -d --build</code> if you build the image
+        yourself). Your data volume is kept.
+      {%- elif update.install == 'git' %} (git checkout):
+        <code>git pull</code>, then
+        <code>pip install -r requirements.txt</code>, then restart the app.
+      {%- else %}:
+        download the source from the
+        <a href="{{ update.url }}" target="_blank" rel="noopener">release page</a>,
+        copy it over this install (your data folder is separate) and
+        restart the app.
+      {%- endif %}</p>
+  {% elif update.latest %}
+    <div class="notice">✅ Up to date. The latest release is
+      {{ update.latest }}.</div>
+  {% endif %}
+  <div class="panel-actions">
+    <form method="post" action="{{ url_for('updates_check') }}">
+      <button class="btn" type="submit">Check for updates</button>
+    {{ csrf_field() }}</form>
+    <span class="muted small">
+      {%- if update.checked_at %}Last checked {{ update.checked_at|localtime }}.
+      {%- else %}Not checked yet.{% endif %}
+      Nothing is downloaded or installed by itself.</span>
+  </div>
+</section>
 
 <section class="panel" id="access">
   <h2 class="panel-title">Access from other devices</h2>

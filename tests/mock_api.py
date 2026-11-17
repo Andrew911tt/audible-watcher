@@ -4,16 +4,21 @@ import audible_api
 import bookinfo
 
 def make_product(asin, title, authors, release_date, series=None, seq=None,
-                 series_asin=None, language="english"):
+                 series_asin=None, language="english", narrators=None,
+                 genres=None, minutes=720):
     p = {
         "asin": asin, "title": title,
         "authors": [{"name": a} for a in authors],
-        "narrators": [{"name": "Test Narrator"}],
+        "narrators": [{"name": n} for n in (narrators or ["Test Narrator"])],
         "release_date": release_date,
-        "runtime_length_min": 720,
+        "runtime_length_min": minutes,
         "language": language,
         "product_images": {"500": f"https://m.media-amazon.com/{asin}.jpg"},
     }
+    if genres:  # [["Top", "Sub"], ...] like Audible's category ladders
+        p["category_ladders"] = [
+            {"root": "Genres", "ladder": [{"name": n} for n in ladder]}
+            for ladder in genres]
     if series:
         p["series"] = [{"title": series, "sequence": seq,
                         "asin": series_asin or "SER123"}]
@@ -42,11 +47,16 @@ def fake_get(marketplace, params):
     if state["include_foreign"]:
         products.insert(0, FOREIGN)
     author = (params.get("author") or "").lower()
+    narrator = (params.get("narrator") or "").lower()
     kw = (params.get("keywords") or "").lower()
     asins = params.get("asins")
     if asins:
         wanted = set(asins.split(","))
         products = [p for p in products if p["asin"] in wanted]
+    elif narrator:  # loose, like Audible's: "porter" finds Davina Porter
+        products = [p for p in products
+                    if any(narrator in n["name"].lower()
+                           for n in p.get("narrators", []))]
     elif author:
         products = [p for p in products
                     if any(author in a["name"].lower() for a in p["authors"])]

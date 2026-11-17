@@ -67,7 +67,7 @@ def test_settings_page_is_one_set_of_cards(client):
     titles = [main[i + len('class="panel-title">'):main.index("<", i + 20)]
               for i in range(len(main)) if main.startswith('class="panel-title">', i)]
     assert titles == ["Audible account", "Monitoring", "Email notifications",
-                      "Access from other devices"]
+                      "About &amp; updates", "Access from other devices"]
     assert "<fieldset" not in main
     email = main[main.index('id="email"'):main.index('class="save-bar"')]
     assert 'formaction="/test-email"' in email          # test button inside

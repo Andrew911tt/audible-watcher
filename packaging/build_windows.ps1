@@ -1,9 +1,11 @@
 # Build the Windows app and installer locally (the GitHub release workflow does the same).
 # Needs: Python 3.12, and Inno Setup 6 (https://jrsoftware.org/isinfo.php) for the installer.
 #   powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -Version 1.0.0
-param([string]$Version = "0.0.0-dev")
+#   (leave out -Version to use the one in version.py)
+param([string]$Version = "")
 $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot -Parent)
+if (-not $Version) { $Version = (python -c "from version import __version__; print(__version__)").Trim() }
 
 python -m pip install -r requirements-desktop.txt
 python packaging\make_icon.py

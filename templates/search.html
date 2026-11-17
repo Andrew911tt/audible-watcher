@@ -1,20 +1,55 @@
 {% extends "base.html" %}
 {% block title %}Add favorites — Audible Watcher{% endblock %}
+
+{% macro narrator_section(narrator_results) %}
+  <h2>Narrator matches</h2>
+  <div class="result-list">
+    {% for r in narrator_results %}
+    <div class="result-card">
+      {% if r.sample and r.sample.image_url %}<img src="{{ r.sample.image_url }}" alt="">{% endif %}
+      <div>
+        <strong>{{ r.name }}</strong>
+        {% if r.also %}<span class="muted small">(also credited as
+          {{ r.also|join(', ') }})</span>{% endif %}
+        <div class="muted small">{{ r.count }} title(s) in search results
+          {% if r.sample %}— e.g. “{{ r.sample.title }}”
+          by {{ r.sample.authors }}{% endif %}</div>
+      </div>
+      {% set wid = watched_group('narrator', r.name) %}
+      {% if wid %}
+      <a class="btn btn-small btn-watching"
+         href="{{ url_for('watch_detail', watch_id=wid) }}">Watching ✓</a>
+      {% else %}
+      <form method="post" action="{{ url_for('add_watch') }}">
+        <input type="hidden" name="type" value="narrator">
+        <input type="hidden" name="name" value="{{ r.name }}">
+        <button class="btn btn-primary btn-small" type="submit">Watch narrator</button>
+      {{ csrf_field() }}</form>
+      {% endif %}
+    </div>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
 {% block content %}
 
 <h1>Add favorites</h1>
-<p class="muted">Search Audible for an author or a series, then add it to
-your watch list. Existing titles are recorded as your baseline; anything
+<p class="muted">Search Audible for an author, a series or a narrator,
+then add it to your watch list. Existing titles are recorded as your baseline; anything
 that appears later counts as new.</p>
 
 <form method="get" action="{{ url_for('search') }}" class="search-form">
-  <input type="text" name="q" value="{{ q }}" placeholder="e.g. Brandon Sanderson or Stormlight Archive" autofocus>
+  <input type="text" name="q" value="{{ q }}" placeholder="e.g. Brandon Sanderson, Stormlight Archive or Michael Kramer" autofocus>
   <button class="btn btn-primary" type="submit">Search</button>
 </form>
 
-{% if q and not results and not series_results %}
-  <p class="muted">No matching authors or series found.</p>
+{% if q and not results and not series_results and not narrator_results %}
+  <p class="muted">No matching authors, series or narrators found.</p>
 {% endif %}
+
+{# a narrator's name matches no author: show the narrator before the
+   series list, which only matches the name loosely #}
+{% set narrators_first = narrator_results and not results %}
 
 {% if results %}
   <h2>Author matches</h2>
@@ -43,6 +78,8 @@ that appears later counts as new.</p>
     {% endfor %}
   </div>
 {% endif %}
+
+{% if narrators_first %}{{ narrator_section(narrator_results) }}{% endif %}
 
 {% if series_results %}
   <h2>Series matches</h2>
@@ -73,5 +110,7 @@ that appears later counts as new.</p>
     {% endfor %}
   </div>
 {% endif %}
+
+{% if narrator_results and not narrators_first %}{{ narrator_section(narrator_results) }}{% endif %}
 
 {% endblock %}

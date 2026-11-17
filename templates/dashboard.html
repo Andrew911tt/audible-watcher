@@ -52,6 +52,19 @@
     by itself until it's done.</div>
 {% endif %}
 
+{% if update %}
+  <div class="notice update-banner">
+    <span>⬆️ <strong>Audible Watcher {{ update.latest }}</strong> is available
+      (you have {{ update.current }}).
+      <a href="{{ url_for('settings_page', _anchor='updates') }}">How to update</a>
+      · <a href="{{ update.url }}" target="_blank" rel="noopener">What's new ↗</a></span>
+    <form method="post" action="{{ url_for('updates_dismiss') }}">
+      <button class="btn btn-small" type="submit"
+              title="Hide this until the next version">Dismiss</button>
+    {{ csrf_field() }}</form>
+  </div>
+{% endif %}
+
 {% if settings.email_enabled != '1' %}
   <div class="notice">Email notifications are off — turn them on in
     <a href="{{ url_for('settings_page') }}">Settings</a> to get emailed
@@ -79,6 +92,9 @@
   <a class="btn {% if tab == 'series' %}active{% endif %}"
      href="{{ url_for('dashboard', tab='series') }}">Series
      <span class="count">{{ series|length }}</span></a>
+  <a class="btn {% if tab == 'narrators' %}active{% endif %}"
+     href="{{ url_for('dashboard', tab='narrators') }}">Narrators
+     <span class="count">{{ narrators|length }}</span></a>
   <a class="btn {% if tab == 'preorders' %}active{% endif %}"
      href="{{ url_for('dashboard', tab='preorders') }}">Pre-orders
      <span class="count">{{ preorders|length }}</span></a>
@@ -89,13 +105,42 @@
 
 {% if tab == 'preorders' %}
   {% if preorders %}
-    {% set from_series = preorders|selectattr('watch_type', 'equalto', 'series')|list %}
-    {% set from_authors = preorders|selectattr('watch_type', 'equalto', 'author')|list %}
-    {% if from_series %}
-      {{ group_section("From series you're following", from_series, show_source=True) }}
+  <form method="get" class="filter-bar" action="{{ url_for('dashboard') }}">
+    <input type="hidden" name="tab" value="preorders">
+    <label>Genre
+      <select name="genre" onchange="this.form.submit()">
+        <option value="">All genres</option>
+        {% for label, n in filters.genres %}
+        <option value="{{ label }}" {% if filters.genre == label %}selected{% endif %}>
+          {%- if filters.sep in label %}&nbsp;&nbsp;– {{ label.split(filters.sep)[-1] }}{% else %}{{ label }}{% endif %} ({{ n }})</option>
+        {% endfor %}
+      </select></label>
+    <label>Length
+      <select name="length" onchange="this.form.submit()">
+        {% for value, label in filters.lengths %}
+        <option value="{{ value }}" {% if filters.length == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select></label>
+    <label>From
+      <select name="source" onchange="this.form.submit()">
+        {% for value, label in filters.sources %}
+        <option value="{{ value }}" {% if filters.source == value %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select></label>
+    <noscript><button class="btn btn-small" type="submit">Filter</button></noscript>
+    {% if filters.genre or filters.length or filters.source %}
+      <span class="muted small">Showing {{ shown_preorders|length }} of {{ preorders|length }}
+        · <a href="{{ url_for('dashboard', tab='preorders') }}">Clear filters</a></span>
     {% endif %}
-    {% if from_authors %}
-      {{ group_section("From authors you're following", from_authors, show_source=True) }}
+  </form>
+    {% for wtype, heading in [('series', "From series you're following"),
+                              ('author', "From authors you're following"),
+                              ('narrator', "From narrators you're following")] %}
+      {% set group = shown_preorders|selectattr('watch_type', 'equalto', wtype)|list %}
+      {% if group %}{{ group_section(heading, group, show_source=True) }}{% endif %}
+    {% endfor %}
+    {% if not shown_preorders %}
+      <p class="muted">No pre-orders match these filters.</p>
     {% endif %}
   {% else %}
   <p class="muted">No upcoming releases across your watches — yet.</p>
@@ -109,6 +154,8 @@
        href="{{ url_for('dashboard', tab='library', view='author') }}">By author</a>
     <a class="btn btn-small {% if view == 'series' %}active{% endif %}"
        href="{{ url_for('dashboard', tab='library', view='series') }}">By series</a>
+    <a class="btn btn-small {% if view == 'narrator' %}active{% endif %}"
+       href="{{ url_for('dashboard', tab='library', view='narrator') }}">By narrator</a>
   </div>
   {% if view == 'all' %}
   <div class="view-toggle sort-toggle">
@@ -140,9 +187,9 @@
   {% if owned_groups %}
     {% for group_name, group in owned_groups %}
     {{ group_section(group_name, group,
-                     wtype=('author' if view == 'author' else 'series'),
+                     wtype=view,
                      asin=(group[0].series_asin if view == 'series' else None),
-                     show_owned=False) }}
+                     show_owned=False, all_narrators=(view == 'narrator')) }}
     {% endfor %}
   {% else %}
   <div class="book-grid">
@@ -153,6 +200,13 @@
   <p class="muted">No owned books synced yet —
     <a href="{{ url_for('settings_page', _anchor='account') }}">connect your Audible account</a>
     (or hit “Sync library now” under Audible account in Settings).</p>
+  {% endif %}
+{% elif tab == 'narrators' %}
+  {% if narrators %}{{ watch_table(narrators) }}
+  {% else %}
+  <p class="muted">No narrators watched yet —
+    <a href="{{ url_for('search', type='narrator') }}">search for one</a>
+    and click “Watch narrator”.</p>
   {% endif %}
 {% elif tab == 'series' %}
   {% if series %}{{ watch_table(series) }}

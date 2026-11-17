@@ -70,6 +70,20 @@ main { max-width: 1000px; margin: 0 auto; padding: 20px 24px 60px; }
   border-radius: 6px; padding: 2px 7px; letter-spacing: .4px; }
 .pill-author { background: #2b3a55; color: #9fc0f0; }
 .pill-series { background: #46335a; color: #cfaff0; }
+.pill-narrator { background: #23473d; color: #9fe0c6; }
+.narrator-link { color: var(--muted); }
+.narrator-link:hover { color: var(--accent); }
+.narrated { margin-top: 2px; }
+
+/* Pre-orders filters */
+.filter-bar { display: flex; flex-wrap: wrap; gap: 10px 16px;
+  align-items: center; margin: -6px 0 16px; }
+.filter-bar label { display: flex; align-items: center; gap: 6px;
+  font-size: 13px; color: var(--muted); margin: 0; }
+.filter-bar select { width: auto; max-width: 260px; }
+
+.update-banner { display: flex; align-items: center; gap: 12px;
+  justify-content: space-between; flex-wrap: wrap; }
 
 .muted { color: var(--muted); }
 .author-link { color: var(--muted); }
@@ -212,6 +226,9 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
     display: none; }
   .topbar { flex-wrap: wrap; gap: 6px; }
   .topbar nav a, .topbar .nav-link { margin: 0 14px 0 0; }
+  /* five dashboard tabs don't fit one phone-width row */
+  .view-toggle.tabs { flex-wrap: wrap; }
+  .view-toggle.tabs .btn { white-space: nowrap; }
 }
 .badge-tba { background: var(--surface2); color: var(--muted);
   border: 1px solid var(--border); font-size: 12px; font-weight: 700;

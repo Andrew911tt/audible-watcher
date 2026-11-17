@@ -42,13 +42,13 @@
 
 {% if view == 'series' %}
   {% for series_name, group in series_groups %}
-  {{ group_section(series_name, group, wtype='series') }}
+  {{ group_section(series_name, group, wtype='series', all_narrators=True) }}
   {% else %}
   <p class="muted">No titles recorded yet.</p>
   {% endfor %}
 {% else %}
   <div class="book-grid">
-    {% for b in books %}{{ book_card(b) }}
+    {% for b in books %}{{ book_card(b, all_narrators=True) }}
     {% else %}
     <p class="muted">No titles recorded yet.</p>
     {% endfor %}
@@ -71,6 +71,8 @@
           {%- if b.available_checked_at %} (checked {{ b.available_checked_at|localtime }}; checked again weekly){% endif %}
         {%- elif b.store_hidden -%}
           · edition from your previous Audible store
+        {%- elif b.mismatch_hidden and watch.type == 'narrator' -%}
+          · not narrated by {{ watch.name }}, or a podcast
         {%- elif b.mismatch_hidden -%}
           · not by {{ watch.name }}, or a podcast
         {%- elif b.placeholder_hidden -%}

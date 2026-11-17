@@ -110,6 +110,18 @@ def main() -> None:
     def on_open(icon, item):
         webbrowser.open(url)
 
+    def on_updates(icon, item):
+        webbrowser.open(url + "/settings#updates")
+
+    def show_updates(item):
+        # read each time the menu opens, so the Settings checkbox applies
+        # without a restart
+        try:
+            return webapp.db.get_settings().get("update_tray_item",
+                                                "1") == "1"
+        except Exception:  # noqa: BLE001 - a menu must never fail
+            return True
+
     def on_data(icon, item):
         os.startfile(DATA_DIR) if sys.platform == "win32" else webbrowser.open(DATA_DIR)
 
@@ -122,6 +134,8 @@ def main() -> None:
                  menu=pystray.Menu(
                      pystray.MenuItem("Open Audible Watcher", on_open, default=True),
                      pystray.MenuItem("Open data folder", on_data),
+                     pystray.MenuItem("Check for updates", on_updates,
+                                      visible=show_updates),
                      pystray.Menu.SEPARATOR,
                      pystray.MenuItem("Quit", on_quit))).run()
 

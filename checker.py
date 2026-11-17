@@ -190,6 +190,9 @@ def _empty_note(watch: dict, books: list) -> str | None:
     if watch["type"] == "author":
         return ("Audible lists no titles credited to exactly this name. "
                 "Check the spelling, or re-add the author from a search.")
+    if watch["type"] == "narrator":
+        return ("Audible lists no titles narrated by exactly this name. "
+                "Check the spelling, or re-add the narrator from a search.")
     return ("Audible found no books for this series in your store. If you "
             "changed marketplace, try removing it and adding it again from "
             "a search.")
@@ -262,12 +265,13 @@ def _update_watch(w: dict, settings: dict) -> list[dict]:
         fresh = db.upsert_books(w["id"], keep, as_new=True)
     db.set_fetch_rev(w["id"], audible_api.FETCH_REVISION)
     db.hide_podcasts(w["id"], podcasts)  # podcasts linked before 1.0.6
-    if w["type"] == "author":
+    if w["type"] in ("author", "narrator"):
         gone = db.hide_not_by_author(w["id"], w["name"],
-                                     {b["asin"] for b in books})
+                                     {b["asin"] for b in books},
+                                     narrator=w["type"] == "narrator")
         if gone:
-            log.info("Watch %r: hid %d title(s) that aren't by this author "
-                     "or are podcasts", w["name"], gone)
+            log.info("Watch %r: hid %d title(s) that aren't this %s's "
+                     "or are podcasts", w["name"], gone, w["type"])
     stubs = db.hide_placeholders(w["id"])
     if stubs:
         log.info("Watch %r: hid %d no-date placeholder(s) of dated books",
@@ -480,6 +484,10 @@ def _book_row_html(b: dict) -> str:
     series = (f"<br><em>{e(b['series_title'])}{seq}</em>"
               if b.get("series_title") else "")
     date = e(b.get("release_date") or "TBA")
+    # one narrator: worth a line; a full cast would crowd the email
+    narrators = audible_api.split_authors(b.get("narrators"))
+    narrated = (f"<br>narrated by {e(narrators[0])}"
+                if len(narrators) == 1 else "")
     img = (f'<img src="{e(b["image_url"])}" width="80" alt="" '
            'style="border-radius:6px;vertical-align:top">'
            if b.get("image_url") else "")
@@ -489,7 +497,7 @@ def _book_row_html(b: dict) -> str:
       <td style="padding:10px 0">
         <a href="{e(b['url'] or '')}" style="font-size:16px;font-weight:bold;
            color:#f29d38;text-decoration:none">{e(b['title'] or '')}</a><br>
-        by {e(b.get('authors') or 'Unknown')}{series}<br>
+        by {e(b.get('authors') or 'Unknown')}{narrated}{series}<br>
         <span style="color:#666">Release date: {date}</span><br>
         <span style="color:#999;font-size:12px">Watched:
         {e(b['watch_name'])} ({e(b['watch_type'])})</span>
@@ -505,8 +513,8 @@ def build_email(books: list[dict]) -> tuple[str, str, str]:
     body = f"""<html><body style="font-family:Arial,Helvetica,sans-serif;
       color:#222;max-width:640px">
       <h2 style="color:#f29d38">🎧 New on Audible</h2>
-      <p>{n} new title{'s' if n != 1 else ''} matching your watched authors
-      and series:</p>
+      <p>{n} new title{'s' if n != 1 else ''} matching your watched authors,
+      series and narrators:</p>
       <table cellspacing="0" cellpadding="0">{rows}</table>
       <p style="color:#999;font-size:12px;margin-top:24px">
         Sent by your Audible Watcher app.</p>

@@ -25,6 +25,7 @@ account.AUTH_FILE = os.path.join(tempfile.mkdtemp(), "no-auth.json")
 
 import checker  # noqa: E402
 import db  # noqa: E402
+import updates  # noqa: E402
 import app as webapp  # noqa: E402
 
 import pytest  # noqa: E402
@@ -42,6 +43,11 @@ def fresh_db(tmp_path, monkeypatch):
     # tests that need metadata call the sync functions directly
     monkeypatch.setattr(checker, "background_enrichment_async", lambda: None)
     monkeypatch.setattr(checker.time, "sleep", lambda s: None)
+
+    # never ask the real GitHub: tests of the update check supply answers
+    def no_github(etag):
+        raise updates.requests.ConnectionError("no network in tests")
+    monkeypatch.setattr(updates, "_fetch", no_github)
     yield
 
 

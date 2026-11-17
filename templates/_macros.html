@@ -1,10 +1,10 @@
-{% macro group_section(group_name, group, wtype=None, asin=None, show_owned=True, show_source=False) %}
+{% macro group_section(group_name, group, wtype=None, asin=None, show_owned=True, show_source=False, all_narrators=False) %}
 <details class="group" open>
   <summary>
     <h2 class="series-head">{{ group_name }}
       <span class="muted small">({{ group|length }} book{{ 's' if group|length != 1 }})</span></h2>
     {% if wtype and group_name not in ('Standalone', 'Unknown') %}
-      {% set wid = watch_id_for(wtype, group_name) %}
+      {% set wid = watched_group(wtype, group_name) %}
       {% if wid %}
         <a class="btn btn-small btn-watching"
            href="{{ url_for('watch_detail', watch_id=wid) }}"
@@ -22,12 +22,12 @@
     {% endif %}
   </summary>
   <div class="book-grid">
-    {% for b in group %}{{ book_card(b, show_source=show_source, show_owned=show_owned) }}{% endfor %}
+    {% for b in group %}{{ book_card(b, show_source=show_source, show_owned=show_owned, all_narrators=all_narrators) }}{% endfor %}
   </div>
 </details>
 {% endmacro %}
 
-{% macro book_card(b, show_source=False, show_owned=True, show_length=False) %}
+{% macro book_card(b, show_source=False, show_owned=True, show_length=False, all_narrators=False) %}
   {# dated future release = orderable pre-order; no date = TBA placeholder
      (Audible has no store page for it yet, so it isn't a pre-order) #}
   {% set preorder = b.release_date and b.release_date > today %}
@@ -54,6 +54,16 @@
           <a class="author-link" href="{{ author_url(name) }}">{{ name.strip() }}</a>{{ ", " if not loop.last }}
         {%- endfor -%}
       </div>
+      {# one narrator: shown everywhere; several (a full cast): only on
+         watch pages, where there's room #}
+      {% set narrators = split_authors(b.narrators) %}
+      {% if narrators and (narrators|length == 1 or all_narrators) %}
+        <div class="muted small narrated">Narrated by
+          {%- for name in narrators %}
+          <a class="narrator-link" href="{{ narrator_url(name) }}">{{ name.strip() }}</a>{{ "," if not loop.last }}
+          {%- endfor -%}
+        </div>
+      {% endif %}
       {% if b.series_title %}
         <div class="muted"><em><a class="series-link" href="{{ series_url(b.series_title) }}">{{ b.series_title }}</a>{% if b.series_sequence %} · Book {{ b.series_sequence }}{% endif %}</em></div>
       {% endif %}

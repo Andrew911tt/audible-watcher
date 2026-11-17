@@ -15,9 +15,12 @@ import requests
 
 log = logging.getLogger(__name__)
 
-RESPONSE_GROUPS = "product_desc,product_attrs,contributors,series,media"
+from version import __version__
+
+RESPONSE_GROUPS = ("product_desc,product_attrs,contributors,series,media,"
+                   "category_ladders")
 HEADERS = {
-    "User-Agent": "AudibleWatcher/1.0 (personal new-release monitor)",
+    "User-Agent": f"AudibleWatcher/{__version__} (personal new-release monitor)",
     "Accept": "application/json",
 }
 
@@ -147,6 +150,33 @@ def _credited_names(author_list: list[str]) -> set[str]:
     return names
 
 
+def narrator_key(name: str | None) -> tuple | None:
+    """First and last name, ignoring middle names and initials, so
+    "Kevin R. Free" and "Kevin Free" are one narrator. None for one-word
+    names (those only match exactly)."""
+    words = [w for w in (norm_name(w) for w in (name or "").split()) if w]
+    return (words[0], words[-1]) if len(words) >= 2 else None
+
+
+def same_narrator(a: str | None, b: str | None) -> bool:
+    """One narrator credited two ways: "R. C. Bray" / "R.C. Bray" (spacing
+    and punctuation) or "Kevin R. Free" / "Kevin Free" (a middle initial)."""
+    if not a or not b:
+        return False
+    if norm_name(a) == norm_name(b):
+        return True
+    key = narrator_key(a)
+    return key is not None and key == narrator_key(b)
+
+
+def credits_narrator(narrators: list[str], name: str) -> bool:
+    """Whether a book's narrator credits include this narrator. Credits
+    that lump several names together ("A & B") are split first."""
+    return any(same_narrator(part, name)
+               for credit in narrators
+               for part in [credit, *re.split(r"\s+(?:&|and)\s+", credit)])
+
+
 _NAME_SUFFIX = re.compile(
     r"^(jr|sr|ii|iii|iv|v|phd|md|esq|ret|obe|mbe|cbe)\.?$", re.IGNORECASE)
 
@@ -187,6 +217,26 @@ def _get(marketplace: str, params: dict) -> dict:
     return _get_json(_base_url(marketplace), params)
 
 
+GENRE_SEP = " › "
+
+
+def _genres(product: dict) -> list[str]:
+    """Genre labels from the catalog's category ladders: each top-level
+    genre ("Science Fiction & Fantasy") and its first sub-genre
+    ("Science Fiction & Fantasy › Fantasy"), without repeats."""
+    out: list[str] = []
+    for entry in product.get("category_ladders") or []:
+        if (entry.get("root") or "Genres") != "Genres":
+            continue
+        names = [s.get("name") for s in (entry.get("ladder") or [])
+                 if s.get("name")]
+        for label in (names[:1] + ([GENRE_SEP.join(names[:2])]
+                                   if len(names) > 1 else [])):
+            if label not in out:
+                out.append(label)
+    return out
+
+
 def _simplify(product: dict, marketplace: str) -> dict:
     authors = [a.get("name", "") for a in (product.get("authors") or [])]
     narrators = [n.get("name", "") for n in (product.get("narrators") or [])]
@@ -206,6 +256,7 @@ def _simplify(product: dict, marketplace: str) -> dict:
         "authors": ", ".join(a for a in authors if a),
         "author_list": [a for a in authors if a],  # names may contain commas
         "narrators": ", ".join(n for n in narrators if n),
+        "narrator_list": [n for n in narrators if n],
         "series_title": series_title,
         "series_sequence": series_sequence,
         "series_asin": series_asin,
@@ -219,6 +270,7 @@ def _simplify(product: dict, marketplace: str) -> dict:
         "language": product.get("language"),
         # "Podcast" for podcasts (not audiobooks); "Product" for books
         "content_type": product.get("content_type"),
+        "genres": _genres(product),
         "image_url": image_url,
         "url": _store_url(marketplace, product.get("asin", "")),
     }
@@ -274,6 +326,51 @@ def search_by_author(name: str, marketplace: str = "us",
     exact = [b for b in out
              if name_lc in (b["authors"] or "").lower()]
     return exact if exact else out
+
+
+def search_by_narrator(name: str, marketplace: str = "us",
+                       max_results: int = 100, strict: bool = False,
+                       sort: str | None = NEWEST_FIRST) -> list[dict]:
+    """Titles narrated by someone, newest first by default.
+
+    Audible's narrator parameter matches loosely ("Porter" also finds
+    Davina Porter). strict=True (watches) keeps only books whose narrator
+    credits name this narrator (see same_narrator: case, spaces,
+    punctuation and middle initials don't matter). Without strict (search), every
+    result is returned and the caller picks out the names."""
+    out, page = [], 0
+    while len(out) < max_results:
+        num = min(50, max_results - len(out))
+        params = {"narrator": name, "num_results": num, "page": page}
+        if sort:
+            params["products_sort_by"] = sort
+        products = _get(marketplace, params).get("products") or []
+        out.extend(_simplify(p, marketplace) for p in products)
+        if len(products) < num:
+            break
+        page += 1
+    if strict:
+        return [b for b in out
+                if credits_narrator(b["narrator_list"], name)]
+    return out
+
+
+def narrator_books(name: str, marketplace: str = "us") -> list[dict]:
+    """Every title a watched narrator narrated, newest first. Audible's
+    search for "Kevin R. Free" misses books credited to "Kevin Free", so a
+    name with a middle part is also searched without it."""
+    words = name.split()
+    queries = [name] + ([f"{words[0]} {words[-1]}"] if len(words) > 2 else [])
+    seen, books = set(), []
+    for q in queries:
+        for b in search_by_narrator(q, marketplace, strict=False,
+                                    max_results=WATCH_FETCH_LIMIT):
+            if b["asin"] not in seen and credits_narrator(b["narrator_list"],
+                                                          name):
+                seen.add(b["asin"])
+                books.append(b)
+    books.sort(key=lambda b: b["release_date"] or "9999", reverse=True)
+    return books
 
 
 def search_by_keywords(keywords: str, marketplace: str = "us",
@@ -435,9 +532,13 @@ def is_podcast(book: dict) -> bool:
 
 def fetch_watch_books(watch_type: str, name: str, asin: str | None,
                       marketplace: str = "us") -> list[dict]:
-    """Current Audible catalog entries for a watched author or series,
-    podcasts included: callers split them off with is_podcast (a podcast
-    that shares an author's name isn't one of their books)."""
+    """Current Audible catalog entries for a watched author, series or
+    narrator, podcasts included: callers split them off with is_podcast (a
+    podcast that shares an author's name isn't one of their books)."""
+    if watch_type == "narrator":
+        # all of their narrations, newest first (prolific narrators have
+        # ~400-500 titles: about 10 requests)
+        return narrator_books(name, marketplace)
     if watch_type == "author":
         # newest first, and all of them: heavily translated authors still
         # show their whole own-language back catalogue

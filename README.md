@@ -1,7 +1,7 @@
 # 🎧 Audible Watcher
 
 A small self-hosted app that watches Audible for **new releases from your
-favorite authors and series** and **emails you** when something new shows up
+favorite authors, series and narrators** and **emails you** when something new shows up
 (including pre-orders, as soon as they're listed).
 
 ![The Pre-orders tab: upcoming audiobooks from followed series and authors, each with cover, release date and a PRE-ORDER or PRE-ORDERED badge](docs/screenshots/preorders.png)
@@ -11,13 +11,19 @@ credentials, no scraping of web pages. Everything runs on your own computer.
 
 **What leaves your machine**, and nothing else:
 
-- **Audible's catalog API** — searches for the authors and series you watch.
+- **Audible's catalog API** — searches for the authors, series and
+  narrators you watch.
 - **Google Books and Open Library** — a book's title and first author, to
   show when it first came out in print. You can turn this off: Settings →
   Monitoring → untick "Show when books first came out in print".
 - **Amazon's image servers** — your browser loads the cover pictures.
 - **Amazon sign-in** — only if you connect your Audible account (optional).
 - **Your own email server** — to send you the notification emails.
+- **GitHub** — the latest release number, to tell you when there's a new
+  version: once a day, and when you click *Check for updates*. Nothing about
+  you or your watches is sent, and nothing is installed by itself. To turn
+  the daily check off: Settings → Monitoring → untick "Check for new
+  versions of Audible Watcher once a day".
 
 Optionally, you can connect your Audible account (Settings → Audible account) to see
 OWNED badges on books you already have and PRE-ORDERED tags on the exact
@@ -38,8 +44,16 @@ Content and Devices".
 
   ![The dashboard's Authors tab: each watched author with their number of titles, upcoming pre-orders and latest release date](docs/screenshots/dashboard.png)
 
-- **Watch authors or series** — search Audible from the app and add them.
-  Watching a series also watches its author.
+- **Watch authors, series or narrators** — search Audible from the app
+  and add them. Watching a series also watches its author. A narrator watch
+  covers everything they narrate, including full-cast productions, and
+  treats "Kevin R. Free" and "Kevin Free" as one person. Narrators are only
+  watched when you add them yourself.
+- **Narrated by** on book cards (when a book has one narrator; full-cast
+  lists show on watch pages), linking to that narrator's page or a search.
+- **Pre-orders filters** — narrow the Pre-orders tab by genre, length, or
+  whether it comes from a series, author or narrator you follow. Filters
+  only change what you see, never what's watched or emailed.
 - **Daily automatic check** (time configurable) plus a "Check Audible now"
   button that runs in the background while the page updates itself.
 - **Email digest** via Gmail or any other email provider when new titles
@@ -56,7 +70,7 @@ Content and Devices".
 - **Your library** (optional) — OWNED and PRE-ORDERED badges, and a Library
   tab with your upcoming pre-orders first. View it all at once (sorted by
   recent purchase, release date, title, author or length) or grouped by
-  author or series. Books you own in another region's edition count as
+  author, series or narrator. Books you own in another region's edition count as
   owned. The library re-syncs about once a day with the daily check, so new
   purchases show up on their own.
 
@@ -67,6 +81,10 @@ Content and Devices".
   the series in the Audible store.
 - **First published** dates: see when a book came out in print before the
   audiobook (can be turned off).
+- **Update notices** — Settings → About & updates shows your version and
+  checks GitHub for a newer one, with how to update for your kind of
+  install. When there is one, the dashboard says so (dismissable). The
+  Windows tray menu has *Check for updates* too (hide it in Settings).
 - **Safe on your network** — an optional password, protection against
   websites that try to reach the app through your browser, and an Access
   panel in Settings showing how yours is set up. See
@@ -331,8 +349,8 @@ separately.
   series up in the new store, quietly re-records all your watches there and
   hides the old store's editions; nothing is flagged as new. A series the
   new store doesn't carry shows a warning on the dashboard.
-- Search results show **Watching ✓** for authors and series you already
-  watch.
+- Search results show **Watching ✓** for authors, series and narrators
+  you already watch.
 - Author watches cover all of an author's titles and match the exact name
   Audible credits (ignoring dots, spaces and capitals), including
   co-written books. Books where the author only wrote a foreword, an
@@ -354,7 +372,10 @@ separately.
 - A book that's in two series shows its number in each series on that
   series' page.
 - A book that matches two watches (e.g. the author *and* the series) shows
-  once on the dashboard, pre-orders and in emails, credited to the series.
+  once on the dashboard, pre-orders and in emails, credited to the series,
+  then the author, then the narrator. A book that's already been announced
+  isn't announced again when another watch finds it later (say Audible
+  credits the narrator weeks after the author's watch found it).
   Each watch's own page still lists it. Marking it seen clears it everywhere.
 - Books announced without a release date get a grey **TBA** badge. They
   aren't emailed until Audible gives them a date and they can be checked
@@ -393,12 +414,15 @@ AW_LIVE_TESTS=1 python -m pytest live_tests
 
 **Building the Windows installer yourself:** install Python 3.12 and
 [Inno Setup 6](https://jrsoftware.org/isinfo.php), then run
-`powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1 -Version 1.0.0`.
+`powershell -ExecutionPolicy Bypass -File packaging\build_windows.ps1`
+(it uses the version in `version.py`; add `-Version 1.2.3` to override).
 The installer lands in `packaging\Output\`.
 
-**Releases:** pushing a tag like `v1.0.0` makes GitHub Actions run the full
-test suite (every OS and Python version, plus the Docker check), then build
-the installer, attach it to a new release and publish the Docker image to
+**Releases:** set the new version in `version.py`, commit, then push a
+matching tag like `v1.1.0` (the release stops if they don't match). The
+release notes are the tagged commit's message. GitHub Actions runs the full
+test suite (every OS and Python version, plus the Docker check), then builds
+the installer, attaches it to a new release and publishes the Docker image to
 `ghcr.io`. Nothing is published if any test fails.
 
 Pull requests and forks are welcome.

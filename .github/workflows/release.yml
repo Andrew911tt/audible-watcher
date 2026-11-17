@@ -10,7 +10,22 @@ permissions:
   contents: write
   packages: write
 jobs:
+  version:
+    # the tag must match version.py, or the app would report the wrong
+    # version (and keep offering itself as an update)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches version.py
+        run: |
+          v=$(python3 -c "from version import __version__; print(__version__)")
+          if [ "v$v" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} doesn't match version.py ($v)"
+            exit 1
+          fi
+
   tests:
+    needs: version
     uses: ./.github/workflows/tests.yml
 
   windows:
@@ -23,6 +38,11 @@ jobs:
           python-version: "3.12"
       - name: Install Inno Setup
         run: choco install innosetup -y --no-progress
+      - name: Release notes from the tagged commit's message
+        shell: bash
+        run: |
+          # HEAD is the tagged commit (a shallow checkout may lack the tag ref)
+          git log -1 --format=%B HEAD | grep -v '^Co-Authored-By:' > release-notes.md
       - name: Build app and installer
         shell: pwsh
         run: |
@@ -32,6 +52,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: packaging/Output/AudibleWatcher-Setup-*.exe
+          body_path: release-notes.md
           generate_release_notes: true
 
   docker:
